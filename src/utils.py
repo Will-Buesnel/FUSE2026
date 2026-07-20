@@ -4,7 +4,7 @@ Will Buesnel, Jul 26.
 Unless specified otherwise, all functions relating to plotting here come from the following source:
 https://github.com/MarkBlyth/parameterisation_methodsx/research/scripts/utils.py
 This is to keep the style of plots etc inkeeping with his,
-and is permissable under the GPU Licence both repos have.
+and is permissable under the GPU Licence that both repos have.
 """
 
 import pandas as pd
