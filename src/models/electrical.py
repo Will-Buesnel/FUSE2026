@@ -16,39 +16,52 @@ Parameters necessary:
     
 
     Equations are taken from p.37 of Mark Blyth's slides: Thermal and electical models for batteries, Nov '24.
+
+    You can add a 'slow' hyperparameter to better view how the model updates over time.
+    I've also added a verbose option to print out variables at each timestep, and a progress bar option to show how far through the simulation we are.
 """
 
 import numpy as np
 from scipy.integrate import solve_ivp
 from typing import Callable
-from base import BaseModel
+from .base import BaseModel
 from tqdm import tqdm
 import time
 
 class ElectricalModel(BaseModel):
     state_names = ["soc", "v_rc1", "v_rc2"]
 
-    def __init__(self, params: dict):
-        super().__init__(params)
+    def __init__(self):
+        pass
 
 
-    def simulate(self, current_func: Callable[[float], float],
-                max_capacity: float,
-                initial_soc: float,
-                ambient_temp: float,
-                t_max: float,
-                max_step: float,
-                atol: float,
-                rtol: float,
-                pbar: bool = False):
+    def simulate(self, current_func: Callable[[float], float] = lambda t: 0.0,  # default to no current
+                y0: list = [1, 0, 0],
+                max_capacity_Ah: float = 2.2, # Ah
+                ambient_temp: float = 25, # deg
+                t_max: float = 3600, # seconds
+                max_step: float = 1.0, # seconds, change
+                atol: float = 1e-6,
+                rtol: float = 1e-3,
+                t_eval: np.ndarray | None = None,
+                pbar: bool = False,
+                verbose: bool = False,
+                slow: bool = False):
         """
         Integrate the ECM state [SOC, v_rc1, v_rc2] from t=0 to t_max.
         Temperature is held at ambient_temp here as without thermal coupling it is essentially isothermal.
         """
-        self.max_capacity = max_capacity  # Ah
-        T = ambient_temp  # placeholder until coupled model drives this
+        if verbose:
+            print("Starting simulation with parameters:")
+            print(f"  max_capacity: {max_capacity_Ah}")
+            print(f"  ambient_temp: {ambient_temp}")
+            print(f"  t_max: {t_max}")
+            print(f"  max_step: {max_step}")
+            print(f"  atol: {atol}")
+            print(f"  rtol: {rtol}")
 
-        y0 = [initial_soc, 0.0, 0.0]  # v_rc1, v_rc2 start at 0 as default values. If we have ICs I'd like to use them ideally.
+        self.max_capacity_As = max_capacity_Ah * 3600 # Ah 
+        T = ambient_temp  # placeholder until coupled model drives this
 
         rhs = self._rhs
         if pbar:
@@ -66,11 +79,12 @@ class ElectricalModel(BaseModel):
                 fun=rhs,
                 t_span=(0.0, t_max),
                 y0=y0,
-                method="RK45",
+                method="BDF",
                 max_step=max_step,
                 atol=atol,
                 rtol=rtol,
-                args=(current_func, T),
+                t_eval=t_eval,
+                args=(current_func, T, verbose, slow),
                 dense_output=True,
             )
 
@@ -82,7 +96,7 @@ class ElectricalModel(BaseModel):
             raise RuntimeError(f"Integration failed: {sol.message}")
 
         soc, v_rc1, v_rc2 = sol.y
-        r0, r1, r2, c1, c2 = self._get_params(soc, T)  # these are the final values at the end of the simulation, but we could also return them as arrays if needed.
+        r0, r1, r2, c1, c2 = self._get_params(soc, T, verbose)  # these are the final values at the end of the simulation, but we could also return them as arrays if needed.
         current = current_func(sol.t)
         # v_cell does not appear in the state vectors therefore it can be calculated in a vectorised way after the simulation
         v_cell = self._v_cell(soc, T, current, r0, v_rc1, v_rc2)
@@ -90,6 +104,7 @@ class ElectricalModel(BaseModel):
         return {
             "t": sol.t,
             "soc": soc,
+            "v_oc": self._ocv_interp(soc, T),
             "v_rc1": v_rc1,
             "v_rc2": v_rc2,
             "v_cell": v_cell,
@@ -98,60 +113,57 @@ class ElectricalModel(BaseModel):
             "sol": sol,  # keep the dense_output object around for resampling if needed
         }
 
-    def _rhs(self, t, y, current_func: Callable, T: float, verbose: bool = False):
+    def _rhs(self, t, y, current_func: Callable, T: float, verbose: bool = False, slow: bool = False):
         """State: y = [soc, v_rc1, v_rc2]. Returns dy/dt."""
         state = self.unpack(y)
 
-        time.sleep(0.5)  # slow down the simulation for demonstration purposes
+        if slow:
+            time.sleep(0.5)  # slow down the simulation for demonstration purposes
+
         soc, v_rc1, v_rc2 = state["soc"], state["v_rc1"], state["v_rc2"]
+        if verbose:
+            print(f"Evaluating _rhs at t={t:.2f}, soc={soc:.4f}, v_rc1={v_rc1:.4f}, v_rc2={v_rc2:.4f}")
         current = current_func(t)
 
-        r0, r1, r2, c1, c2 = self._get_params(soc, T) # non-vectorised operation.
+        r0, r1, r2, c1, c2 = self._get_params(soc, T, verbose) # non-vectorised operation.
 
-        if verbose:
-            print(f"t={t:.2f}, soc={soc:.4f}, v_rc1={v_rc1:.4f}, v_rc2={v_rc2:.4f}, current={current:.4f}")
-            print(f"r0={r0:.4f}, r1={r1:.4f}, r2={r2:.4f}, c1={c1:.4f}, c2={c2:.4f}")
 
         soc_dot = self._soc_ode(current)
         v_rc1_dot = (current * r1 - v_rc1) / (r1 * c1)
         v_rc2_dot = (current * r2 - v_rc2) / (r2 * c2)
 
+        if verbose:
+            print(f"t={t:.2f}, soc={soc:.4f}, v_rc1={v_rc1:.4f}, v_rc2={v_rc2:.4f}, current={current:.4f}")
+            print(f"r0={r0:.4f}, r1={r1:.4f}, r2={r2:.4f}, c1={c1:.4f}, c2={c2:.4f}")
+
+            print(f"{soc_dot=:.4f}, {v_rc1_dot=:.4f}, {v_rc2_dot=:.4f}")
 
         return self.pack(soc=soc_dot, v_rc1=v_rc1_dot, v_rc2=v_rc2_dot)
 
-    def _get_params(self, soc, T):
-        r0 = self._r0_func(T, soc)
-        r1 = self._r1_func(T, soc)
-        r2 = self._r2_func(T, soc)
-        c1 = self._c1_func(T, soc)
-        c2 = self._c2_func(T, soc)
+    def _get_params(self, soc, T, verbose=False):
+        """Get the parameters r0, r1, r2, c1, c2 for the given soc and T."""
+        # vectorised: soc, T can be scalars or arrays
+        if verbose:
+            print(f"Getting parameters for soc={soc}, T={T}")
+        r0 = self._r0_interp(soc, T)
+        r1 = self._r1_interp(soc, T)
+        r2 = self._r2_interp(soc, T)
+        t1 = self._tau1_interp(soc, T)
+        t2 = self._tau2_interp(soc, T)
+        c1 = t1 / r1
+        c2 = t2 / r2
+        if verbose:
+            print(f"r0={r0}, r1={r1}, r2={r2}, c1={c1}, c2={c2}")
         return r0, r1, r2, c1, c2
 
     def _soc_ode(self, current):
-        capacity_As = self.max_capacity * 3600.0  # Ah -> As. # TODO: is this correct?
+        capacity_As = self.max_capacity_As 
         return current / capacity_As
 
     def _v_cell(self, soc, T, current, r0, v_rc1, v_rc2):
-        voc = self._voc_func(soc, T)
-        return voc - current * r0 - v_rc1 - v_rc2
-
-    def set_r0_func(self, r0_func: Callable[[float, float], float]):
-        self._r0_func = r0_func
-
-    def set_r1_func(self, r1_func: Callable[[float, float], float]):
-        self._r1_func = r1_func
-
-    def set_r2_func(self, r2_func: Callable[[float, float], float]):
-        self._r2_func = r2_func
-
-    def set_c1_func(self, c1_func: Callable[[float, float], float]):
-        self._c1_func = c1_func
-
-    def set_c2_func(self, c2_func: Callable[[float, float], float]):
-        self._c2_func = c2_func
-
-    def set_v_oc_func(self, voc_func: Callable[[float], float]):
-        self._voc_func = voc_func
+        voc = self._ocv_interp(soc, T)
+        return voc + current * r0 - v_rc1 - v_rc2
+    
 
 def test_rhs_func():
     """Test the _rhs function of the ElectricalModel class."""
@@ -172,18 +184,18 @@ def test_rhs_func():
     model = ElectricalModel(params)
 
     # Set dummy parameter functions
-    model.set_r0_func(lambda T, soc: 0.1)
-    model.set_r1_func(lambda T, soc: 0.05)
-    model.set_r2_func(lambda T, soc: 0.02)
-    model.set_c1_func(lambda T, soc: 1000.0)
-    model.set_c2_func(lambda T, soc: 500.0)
-    model.set_v_oc_func(lambda soc, T: 3.7)
+    model.set_r0_interp(lambda T, soc: 0.1)
+    model.set_r1_interp(lambda T, soc: 0.05)
+    model.set_r2_interp(lambda T, soc: 0.02)
+    model.set_c1_interp(lambda T, soc: 1000.0)
+    model.set_c2_interp(lambda T, soc: 500.0)
+    model.set_v_oc_interp(lambda soc, T: 3.7)
     
 
     # Test the _rhs function at t=0 with initial state
     t = 0.0
     y = [1.0, 0.0, 0.0]  # initial state: [soc, v_rc1, v_rc2]
-    model.max_capacity = 2.0  # Set max_capacity for the model
+    model.max_capacity_Ah = 2.0  # Set max_capacity for the model
     dy_dt = model._rhs(t, y, current_func, params["T"])
     # iterate it
     for i in range(10):
@@ -198,4 +210,4 @@ def test_rhs_func():
     print("dy/dt at t=0:", dy_dt)
 
 if __name__ == "__main__":
-    test_rhs_func()
+    pass
