@@ -1,82 +1,93 @@
 "Will Buesnel, Jul 26."
 
-from parameters import load_parameter_interpolants
+from os import times
+
+import numpy
+from numpy.testing import verbose
+
+from parameters import get_all_parameter_interpolants
 from electrical import ElectricalModel
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
-def test_simulation():
+def _test_simulation(**kwargs):
     # load the parameter interpolants from the CSV file
     param_file_path = "data/processed/MLP001_params.csv"
-    param_interpolants = load_parameter_interpolants(param_file_path)
+    ocv_file_path = "data/processed/MLP001_ocv.csv"
+
+    param_df, ocv_df = pd.read_csv(param_file_path), pd.read_csv(ocv_file_path)
+
+    param_interpolants = get_all_parameter_interpolants(param_df, ocv_df) # remember this is a dict of interpolants.
+
     print("Loaded parameter interpolants:")
-    for param_name, interpolant in param_interpolants.items():
-        print(f"{param_name}: {interpolant}")
     
-    # create an instance of the ElectricalModel with the loaded parameters
-    model_params = {
-        "R_cell": param_interpolants["r0"],
-        "SoC": 1,  # initial state of charge
-        "Voc": 3.7,  # open-circuit voltage
-        "ambient_temp": 25.0,  # ambient temperature in Celsius
-        "T": 25.0,  # current temperature of the cell
-        "current_func": lambda t: 1.0,  # constant current of 1A
-        "max_capacity": 2.0,  # nominal capacity in Ah
-    }
-    model = ElectricalModel(model_params)
+    model = ElectricalModel()
 
     # set the interpolants as funcs for the model
-    model.set_c1_func(param_interpolants["c1"])
-    model.set_c2_func(param_interpolants["c2"])
-    model.set_r0_func(param_interpolants["r0"])
-    model.set_r1_func(param_interpolants["r1"])
-    model.set_r2_func(param_interpolants["r2"])
+    for name, interpolant in param_interpolants.items():
 
-    # simulate the model for a given time span
-    t_max = 3600  # simulate for 1 hour
-    max_step = 1.0  # maximum step size for the solver
-    atol = 1e-6  # absolute tolerance for the solver
-    rtol = 1e-3  # relative tolerance for the solver
-    model.simulate(
-        current_func=model_params["current_func"],
-        max_capacity=model_params["max_capacity"],
-        initial_soc=model_params["SoC"],
-        ambient_temp=model_params["ambient_temp"],
-        t_max=t_max,
-        max_step=max_step,
-        atol=atol,
-        rtol=rtol,
-        pbar=True  # enable progress bar
-    )
+        name = name.split(" ")[0].split("[")[0].lower()  # take only the first part of the name, e.g. "R0 [Ohm]" -> "R0"
+        print(f"Setting parameter interpolant for {name}")
+        setattr(model, f"_{name}_interp", interpolant) 
+        
+    return model.simulate(**kwargs)
 
 
-def test_rhs_with_interpolants(): # currently the interpolants for v and 
-    # load the parameter interpolants from the CSV file
-    param_file_path = "data/processed/MLP001_params.csv"
-    param_interpolants = load_parameter_interpolants(param_file_path)
+def plot_tests(current: int = -1, t_max: float = 1000.0, pbar: bool = False, verbose: bool = False, slow: bool = False):
+    # first test simulation where we add no current, so the SoC should remain constant at 1.0.
+
+    res_1_dict= _test_simulation(y0=[0.5, 0, 0], t_max=t_max) # (passed)
+
+    # test with positive current
+    res_2_dict= _test_simulation(y0=[1.0, 0, 0], current_func=lambda t: current, t_max=t_max, pbar=pbar, verbose=verbose, slow=slow) # (passed
     
-    # create an instance of the ElectricalModel with the loaded parameters
-    model_params = {
-        "R_cell": param_interpolants["r0"],
-        "SoC": 1,  # initial state of charge
-        "Voc": 3.7,  # open-circuit voltage
-        "ambient_temp": 25.0,  # ambient temperature in Celsius
-        "T": 25.0,  # current temperature of the cell
-        "current_func": lambda t: 1.0,  # constant current of 1A
-        "max_capacity": 2.0,  # nominal capacity in Ah
-    }
-    model = ElectricalModel(model_params)
-    model.max_capacity=model_params["max_capacity"]
-    # set the interpolants as funcs for the model
-    model.set_c1_func(param_interpolants["c1"])
-    model.set_c2_func(param_interpolants["c2"])
-    model.set_r0_func(param_interpolants["r0"])
-    model.set_r1_func(param_interpolants["r1"])
-    model.set_r2_func(param_interpolants["r2"])
+    # test with positive cosine current
+    res_3_dict= _test_simulation(y0=[1.0, 0, 0], current_func=lambda t: np.cos(t)-1, t_max=t_max, pbar=pbar, verbose=verbose, slow=slow) # (passed)
 
-    # test the _rhs function at t=0 with initial state
-    t = 0.0
-    y = [model_params["SoC"], 0.0, 0.0]  # initial state: [soc, v_rc1, v_rc2]
-    dy_dt = model._rhs(t, y, model_params["current_func"], model_params["T"], verbose=True)
-    print("dy/dt at t=0:", dy_dt)
+    # graph all results
+    # one ax for soc, one for v_rc1, one for v_rc2. 3 rows, 1 column.
+    fig, axs = plt.subplots(5, 1, figsize=(8, 6), constrained_layout=True)
 
+    times1 = res_1_dict["t"]
+    times2 = res_2_dict["t"]
+    times3 = res_3_dict["t"]
+    axs[0].plot(times1, res_1_dict["soc"], label="No current")
+    axs[0].plot(times2, res_2_dict["soc"], label="Positive current")
+    axs[0].plot(times3, res_3_dict["soc"], label="Cosine current")
+    axs[0].set_ylabel("SoC")
+
+    axs[1].plot(times1, res_1_dict["v_rc1"], label="No current")
+    axs[1].plot(times2, res_2_dict["v_rc1"], label="Positive current")
+    axs[1].plot(times3, res_3_dict["v_rc1"], label="Cosine current")
+    axs[1].set_ylabel("v_rc1")
+
+    axs[2].plot(times1, res_1_dict["v_rc2"], label="No current")
+    axs[2].plot(times2, res_2_dict["v_rc2"], label="Positive current")
+    axs[2].plot(times3, res_3_dict["v_rc2"], label="Cosine current")
+    axs[2].set_ylabel("v_rc2")
+
+
+    axs[3].plot(times1, res_1_dict["v_cell"], label="No current")
+    axs[3].plot(times2, res_2_dict["v_cell"], label="Positive current")
+    axs[3].plot(times3, res_3_dict["v_cell"], label="Cosine current")
+    axs[3].set_ylabel("v_cell")
+
+
+    axs[4].plot(times1, res_1_dict["v_oc"], label="No current")
+    axs[4].plot(times2, res_2_dict["v_oc"], label="Positive current")
+    axs[4].plot(times3, res_3_dict["v_oc"], label="Cosine current")
+    axs[4].set_ylabel("v_oc")
+    axs[4].set_xlabel("Time (s)")
+   
+    # add 0.5 alpha value to all lines so we can see overlapping lines better
+    for ax in axs:
+        for line in ax.get_lines():
+            line.set_alpha(0.5)
+     # only add axes for bottom ax, add below the graph,
+    axs[-1].legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, -2))
+    plt.show()
+
+# TODO: check sign convention for current,
 if __name__ == "__main__":
-    test_rhs_with_interpolants()
+    plot_tests(t_max = 60**2, pbar=True)  # 1 hour simulation
