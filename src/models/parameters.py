@@ -22,9 +22,6 @@ import pandas as pd
 
 class ParameterInterpolator:
     """Wraps a single parameter's SOC/T scattered data as a callable interpolator."""
-    # the data we are working with is not on a regular grid  (hard to do with SoC in fairness), so we need to use  a scattered interpolator
-    # I am not sure which is better, but theres relatively low cost to having functionality for both
-    # will evaluate which is better later on.
 
     def __init__(self, temps, socs, values, method="clough_tocher"):
         points = np.column_stack([temps, socs])
@@ -44,23 +41,143 @@ class ParameterInterpolator:
         # this would only be a problem in the electric-only or thermal-only case.
         pts = np.stack([T_arr.ravel(), soc_arr.ravel()], axis=-1)
         result = self._interp(pts)
+        # check for Nans, which would indicate extrapolation.
+        if np.any(np.isnan(result)):
+            raise ValueError(f"ParameterInterpolator extrapolated at soc={soc}, T={T}")
         return result.reshape(soc_arr.shape)
     
+    
+def filter_outliers(df, param_cols, temp_col='Temperature_degC', soc_col='SOC',
+                     window=5, z_thresh=3.0):
+    """
+    Filter out local outliers per temperature group, based on deviation from
+    a rolling median across SOC (robust to trends in the parameter surface,
+    unlike a global z-score).
+    Output a message indicating how many rows were removed.
+    """
+    df = df.sort_values([temp_col, soc_col]).copy()
+    keep_mask = pd.Series(True, index=df.index)
 
-def load_parameter_interpolants(path: Path, method="clough_tocher") -> dict:
-    df = pd.read_csv(path)
-    df["C1 [F]"] = df["tau1 [s]"] / df["R1 [Ohm]"]
-    df["C2 [F]"] = df["tau2 [s]"] / df["R2 [Ohm]"]
+    for T, group in df.groupby(temp_col):
+        for col in param_cols:
+            rolling_med = group[col].rolling(window, center=True, min_periods=1).median()
+            resid = (group[col] - rolling_med).abs()
+            mad = resid.rolling(window, center=True, min_periods=1).median()
+            # scale MAD to be comparable to std dev for a normal distribution
+            local_z = resid / (1.4826 * mad + 1e-9)
+            keep_mask.loc[group.index] &= (local_z < z_thresh)
 
+    filtered_df = df[keep_mask]
+    print(f"Filtered out {len(df) - len(filtered_df)} outliers based on local z-score threshold of {z_thresh}.")
+    return filtered_df
+    
+
+def get_parameter_interpolant(df: pd.DataFrame, column_name: str, method="clough_tocher") -> dict:
+    """
+    Load parameter data from a CSV file and create interpolants for each parameter.
+    The CSV file should have columns: 'Temperature_degC', 'SOC', 'R0 [Ohm]', 'R1 [Ohm]', 'R2 [Ohm]', 'tau1 [s]', 'tau2 [s]'.
+    The function will compute C1 and C2 from tau1/R1 and tau2/R2, respectively, and create interpolants for R0, R1, R2, C1, and C2 as functions of SOC and Temperature.
+    Returns a dictionary of ParameterInterpolator objects for each parameter.
+
+    Currently it uses the same interpolation method for all parameters.
+    """
+
+    # sort before building interpolants to make sure x is monotonically increasing for the parameter.
+    # this stops binary search from failing in the interpolator.
+    # the assumption is that the data is already sorted by temperature, then SOC, but this is a safety measure.
+    # another assummption is that all records are fully populated, which if not true would throw off the sorting and break the interpolator.
+    
+    sort_by = ["Temperature_degC", "SOC"]
+    df = df.sort_values(by=sort_by)
     temps = df["Temperature_degC"].to_numpy()
     socs = df["SOC"].to_numpy()
+    param = df[column_name].to_numpy()
 
-    param_cols = {
-        "r0": "R0 [Ohm]", "r1": "R1 [Ohm]", "r2": "R2 [Ohm]",
-        "c1": "C1 [F]", "c2": "C2 [F]",
-    }
+    return {column_name: ParameterInterpolator(temps, socs, param, method=method)}
 
-    return {
-        name: ParameterInterpolator(temps, socs, df[col].to_numpy(), method=method)
-        for name, col in param_cols.items()
-    }
+
+def get_all_parameter_interpolants(paramdf: pd.DataFrame, ocvdf: pd.DataFrame, method="clough_tocher") -> dict:
+    # get interpolants for all parameters in the parameter dataframe
+    param_cols = ["R0 [Ohm]", "R1 [Ohm]", "R2 [Ohm]", "tau1 [s]", "tau2 [s]"]
+    param_interpolants = {}
+    for col in param_cols:
+        param_interpolants.update(get_parameter_interpolant(paramdf, col, method=method))
+
+    # get interpolants for ocv
+    ocv_interpolants = get_parameter_interpolant(ocvdf, "OCV[V]", method=method)
+    param_interpolants.update(ocv_interpolants)
+
+    return param_interpolants
+
+
+def _test_get_all_parameter_interpolants():
+    # Load the parameter data from the CSV file
+    param_file_path = "data/processed/MLP001_params.csv"
+    ocv_file_path = "data/processed/MLP001_ocv.csv"
+    paramdf = pd.read_csv(param_file_path)
+    ocvdf = pd.read_csv(ocv_file_path)
+
+    # Get all parameter interpolants
+    param_interpolants = get_all_parameter_interpolants(paramdf, ocvdf)
+
+    # Test the interpolants by evaluating them at a few points
+    test_points = [
+        (0.5, 25),  # SoC=0.5, T=25°C
+        (0.8, 30),  # SoC=0.8, T=30°C
+        (0.2, 20),  # SoC=0.2, T=20°C
+    ]
+
+    for soc, T in test_points:
+        print(f"At SoC={soc}, T={T}°C:")
+        for name, interpolant in param_interpolants.items():
+            value = interpolant(soc, T)
+            print(f"  {name}: {value}")
+
+
+def _test_filter_outliers():
+    # Load the parameter data from the CSV file
+    param_file_path = "data/processed/MLP001_params.csv"
+    df = pd.read_csv(param_file_path)
+
+    # Define the parameter columns to check for outliers
+    param_cols = ["R0 [Ohm]", "R1 [Ohm]", "R2 [Ohm]", "tau1 [s]", "tau2 [s]"]
+
+    # Filter out outliers
+    filtered_df = filter_outliers(df, param_cols, z_thresh=3.0)
+
+    # Print the number of rows before and after filtering
+    print(f"Original number of rows: {len(df)}")
+    print(f"Number of rows after filtering: {len(filtered_df)}")
+
+    # check one known previously problematic point, which was an outlier in the R1 parameter at T=25, SOC=0.6
+    print(f"0.6113564957494135 in filtered_df['SOC'].values: {0.6113564957494135 in filtered_df['SOC'].values}")  # should be False now
+
+
+def _test_delaunay():
+    """
+    Test Delaunay triangulation on the parameter data.
+    This is to check how well structured the parameter data is for Clough-Tocher interpolation.
+    """
+    from scipy.spatial import Delaunay
+    # Load the parameter interpolants from the CSV file
+    param_file_path = "data/processed/MLP001_params.csv"
+    df = filter_outliers(pd.read_csv(param_file_path), ["R0 [Ohm]", "R1 [Ohm]", "R2 [Ohm]", "tau1 [s]", "tau2 [s]"])
+    points = np.column_stack([df["SOC"].to_numpy(), df["Temperature_degC"].to_numpy()])
+    delaunay = Delaunay(points)
+
+    queries = np.array([[0, 25], [0.6,25], [1, 25]]) # try three cases
+    simplices = delaunay.find_simplex(queries)
+   
+    for simplex, query in zip(simplices, queries):
+        if simplex == -1:
+            print(f"Query point {query} is outside the convex hull of the data.")
+        else:
+            verts = delaunay.simplices[simplex]
+            print(f"Query point {query} is inside simplex {simplex}.")
+            print("triangle vertices (SOC,T):", points[verts])
+            
+
+if __name__ == "__main__":
+    _test_get_all_parameter_interpolants()
+
+
