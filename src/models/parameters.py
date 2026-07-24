@@ -1,19 +1,14 @@
 """
 Will Buesnel, Jul 26.
 
-This module will hold all classes relating to parameters.
-This (inexhaustively) includes:
+This module will holdd classes relating to parameters.
+This currently includes a ParameterInterpolator class, which wraps a single parameter's SOC/T scattered data as a callable interpolator.
+It also includes a function to load parameter data from a CSV file and create interpolants for each parameter.
+The CSV file should have columns: 'Temperature_degC', 'SOC', 'R0 [Ohm]', 'R1 [Ohm]', 'R2 [Ohm]', 'tau1 [s]', 'tau2 [s]'.
 
-- Parameter class: a class to hold a single parameter, its value, and its units (bounds?)
-    These should be dataclass objects. Not sure about mutability yet.
+I've also kept the filter_outliers function here, which is used to filter out local outliers per temperature group, based on deviation from a rolling median across SOC (robust to trends in the parameter surface, unlike a global z-score).
+I don't currently use it, but would like to investigate if it is useful in getting better interpolant functions. It outputs a message indicating how many rows were removed.
 
-- ParameterSet class: a class to hold a set of parameters, and to allow for easy access and manipulation of those parameters.
-    These should also be dataclass objects. Not sure about mutability yet.
-
-- ParameterTable class: a class to hold a list of parameter sets essentially, 
-    above might also include logic for knowing when each parameter set is valid
-
-Haven't totally figured it out yet, but this is the general idea.
 """
 import numpy as np
 import scipy.interpolate
@@ -108,6 +103,18 @@ def get_all_parameter_interpolants(paramdf: pd.DataFrame, ocvdf: pd.DataFrame, m
     param_interpolants.update(ocv_interpolants)
 
     return param_interpolants
+
+def format_interpolants(interpolants: dict) -> dict:
+    """
+    Format the interpolants dictionary to have keys that are more suitable for setting as attributes in the model.
+    For example, "R0 [Ohm]" becomes "r0", "tau1 [s]" becomes "tau1", and "OCV[V]" becomes "ocv".
+    """
+    formatted_interpolants = {}
+    for name, interpolant in interpolants.items():
+        # take only the first part of the name, e.g. "R0 [Ohm]" -> "R0"
+        name = name.split(" ")[0].split("[")[0].lower()
+        formatted_interpolants[name] = interpolant
+    return formatted_interpolants
 
 
 def _test_get_all_parameter_interpolants():
