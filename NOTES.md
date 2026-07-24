@@ -78,3 +78,7 @@ A change of sign convention wouldn't normally be an issue, but in. the Theveninm
 # Amey suggestions:
 .Put an event in the solver for when you reach the floor of soc, since this does not behave linearly and makes the error look unusually large.
 .He agrees that trying dequantisation would be a useful addition.
+.I need to decrease max step size to be smaller than the resolution of the experiment data.
+
+# Notes on couped model:
+assuming far field temperature == ambient temperature.
