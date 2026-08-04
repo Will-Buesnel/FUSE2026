@@ -4,7 +4,20 @@ dataclass for having different batteries with different parameters.
 """
 
 class Cell:
-    def __init__(self, name: str, capacity_Ah: float, c: float, h: float, c_p: float, rho: float, volume: float= 1):
+    def __init__(self, name: str, capacity_Ah: float, c: float, h: float, c_p: float, rho: float, volume: float= 1, entropy_coeff_func=lambda soc: 0):
+        """
+        Initialize a Cell instance.
+
+        Parameters:
+        name (str): The name of the cell.
+        capacity_Ah (float): The capacity of the cell in ampere-hours.
+        c (float): The heat capacity of the cell in J/K.
+        h (float): The heat transfer coefficient of the cell in W/K.
+        c_p (float): The specific heat capacity of the cell in J/kg/K.
+        rho (float): The density of the cell in kg/m^3.
+        volume (float): The volume of the cell in m^3.
+        entropy_coeff_func (callable): A function that returns the entropic coefficient for a given SOC.
+        """
         self.name = name
         self.capacity_Ah = capacity_Ah
         self.c = c
@@ -12,4 +25,5 @@ class Cell:
         self.c_p = c_p
         self.rho = rho
         self.volume = volume
+        self.entropy_coeff_func = entropy_coeff_func
 
