@@ -56,7 +56,7 @@ def add_zoom_inset(
     return axins
 
 
-def get_drive_cycle_df(cycler_file: str) -> pd.DataFrame:
+def get_drive_cycle_hours_col(cycler_file: str) -> pd.DataFrame:
     drive_df = pd.read_csv(cycler_file)
 
     # add an hours column to df:
@@ -80,11 +80,57 @@ def get_errors_by_resampling(model_ts, experiment_times, experiment_voltages, mo
     errors = model_voltages - resampled_exp_voltages
     return errors
 
+from tqdm import tqdm
+
+def dequantise_data(time: np.ndarray, pbar: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Dequantise data assuming resolution error: if N samples share the same
+    timestamp, spread them evenly across the interval up to the next distinct
+    timestamp, assuming time is monotonically non-decreasing.
+    """
+    time = time.astype(float).copy()
+    n = int(len(time))
+    index = 0
+
+    progress = tqdm(total=n, unit="pt", desc="Dequantising") if pbar else None
+
+    try:
+        while index < n:
+            same_time_points = np.where(time == time[index])[0]
+            count = len(same_time_points)
+            for i in range(0,count):
+                timestep = time[index + i]
+                time[index + i] = time[index] + (i / count) * (time[index + count] - timestep) if index + count < n else timestep
+
+            index += count  # always advances, avoids infinite loop
+            if progress is not None:
+                progress.update(count)
+    finally:
+        if progress is not None:
+            progress.close()
+
+    return time
+
+
+
 def incomplete_get_errors_by_dequantisation(model_ts, experiment_times, experiment_voltages, model_voltages) -> np.ndarray:
     """
     The dataset currently has multiple voltage measurements at the same time point due to the resolution not being less than seconds.
     we do however know the data is monotonically increasing in time, therefore we can break down into microseconds
     """
+
+def get_mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Calculate the mean squared error between two arrays.
+    """
+    return np.mean((y_true - y_pred) ** 2)
+
+
+def get_abs_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Calculate the mean absolute error between two arrays.
+    """
+    return np.mean(np.abs(y_true - y_pred))
 
 
 def convert_datetime_to_hours(df: pd.DataFrame, time_col: str = "Total Time") -> pd.DataFrame:
