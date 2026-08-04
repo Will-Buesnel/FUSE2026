@@ -19,21 +19,15 @@ Capacity is it's current state of charge.
 Will assume Cough-Tocher interpolation is applicable to all interpolants, but this could be subject to further investigation later. it does by default cause NaN values to appear when the known bounds are exceeded, so will need to be aware of this.
 
 # Current questions:
-Should capacity in the soc ode be defined as instantaneous or maximal capacity?
-
-How are the intervals for parameter estimation defined? (pretty sure they are overlapping but that is about as far as I have got to with it).
-
-if I'm using a dual-pair thevenin circuit model as defined by the powerpoint lecture notes, but the data does not include values for both, how should I work this out
-
-Why is there only a detailed dataset for 25 degrees?
-
-What method should be used for interpolation?
-How best to handle any extrapolation (i.e. if the temp will exceed 40 deg)
-
 For the sensitivity analysis, how should interpolation error be considered?
 
 Where does the thermal/temperature data come from?
     How do I validate the thermal data?
+
+A point I am generally confused about is surely my investigation into how much error is in each parameter / each module of the model is just going to be some function of my assumptions about how much error there is originally? I'm not sure how the backprop factors in either.
+
+
+
 
 # Code functionality
 Basemodel.unpack(y) assumes the vector y is either made up by a flat list of scalars or will also work elementwise if arrays are passed in.
@@ -73,7 +67,7 @@ will try de-quantisation instead of sampling.
 # Points of note with equations
 In Mark's code, there is a discrepancy between the equations given and what is in the code.
 for soc_dot, he flips the polarity of the current, whereas in the equations he keeps it positive
-A change of sign convention wouldn't normally be an issue, but in. the Theveninmodel class line 128, you can see that this change in sign convention is not kept. I think maybe the slides are wrong? In any case, I have made my code refect his, rather than the slides.
+A change of sign convention wouldn't normally be an issue, but in. the Theveninmodel class line 128, you can see that this change in sign convention is not kept. I think maybe the slides are wrong? In any case, I have made my code refect his, rather than the slides. 
 
 # Amey suggestions:
 .Put an event in the solver for when you reach the floor of soc, since this does not behave linearly and makes the error look unusually large.
@@ -82,3 +76,12 @@ A change of sign convention wouldn't normally be an issue, but in. the Theveninm
 
 # Notes on couped model:
 assuming far field temperature == ambient temperature.
+From more research, it seems that the models need to be differentiable in order for most Bayesian inference methods to work.
+
+# Notes on adding Bayesian inference.
+How do I get my prior distributions? resolution of meters?  
+    Use the dataset to get distribution, i.e. empirical Bayes. Bootstrapping.
+
+# Thermal model
+should temperature be in Kelvin or degrees?
+
