@@ -15,9 +15,11 @@ def main():
     ocv_df = pd.read_csv(processed_dir / "MLP001_ocv.csv")
 
     # get dict of parameter interpolants.
-    param_interpolants = get_all_parameter_interpolants(param_df, ocv_df)
+    param_interpolants = get_all_parameter_interpolants(param_df, ocv_df, method="clough_tocher")
 
-    socs = np.linspace(0, 1, 100)
+
+
+    socs = np.linspace(0.15, 0.9, 100)
     base_temp = 25 * np.ones_like(socs)
 
     temps = np.linspace(5, 40, 100)
