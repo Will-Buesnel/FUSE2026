@@ -22,8 +22,8 @@ Parameters necessary:
 """
 
 import numpy as np
-from panel import state
-from panel import state
+
+
 from scipy.integrate import solve_ivp
 from typing import Callable
 from models.base import BaseModel
@@ -104,7 +104,7 @@ class ElectricalModel(BaseModel):
             )
 
         finally:
-            if pbar:
+            if pbar is not None:
                 pbar.close()
 
         if not sol.success:
