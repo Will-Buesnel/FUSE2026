@@ -7,7 +7,7 @@ import numpy as np
 from models.coupled import CoupledModel, ThermalModel
 from models.electrical import ElectricalModel
 from models.parameters import get_all_parameter_interpolants, format_interpolants
-from utils import get_drive_cycle_df, make_plot, get_errors_by_resampling
+from utils import get_drive_cycle_hours_col, make_plot, get_errors_by_resampling
 from cells import Cell
 import matplotlib.pyplot as plt
 
@@ -15,10 +15,10 @@ def run_simulation_from_exp(
         exp_df: pd.DataFrame,
         ocv_df: pd.DataFrame,
         param_df: pd.DataFrame,
+        entropy_df: pd.DataFrame,
         cell: Cell,
         T_inf_degC: float = 25.0,
         y0: list = [1,0,0,25], # default initial state: soc=1, v_rc1=0, v_rc2=0, T=25 deg C
-        t_max: float | None = None,
         **kwargs
 ) -> dict:
     """
@@ -29,9 +29,11 @@ def run_simulation_from_exp(
     Returns: res, a dictionary containing simulation results. See code below for more details.
     The res["t"] will be in seconds, and the res["soc"] will be a fraction between 0 and 1.
     """
-    # check t_max is not None, if it is then set it to the max time in the experiment data.
-    if t_max is None:
-        t_max = exp_df["Elapsed Time[h]"].max() * 3600  # convert to seconds
+    # look for tspan in kwargs, if it exists then set t_max to the end of the tsapn.
+    if "t_span" in kwargs:
+        t_max = kwargs["t_span"][1]
+    else:
+        t_max = exp_df["Elapsed Time[h]"].to_numpy()[-1] * 3600  # convert to seconds.
 
     experiment_times = exp_df["Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds.
     experiment_currents = -exp_df["Current(A)"].to_numpy() # flip sign of curret to match equations given.
@@ -52,6 +54,9 @@ def run_simulation_from_exp(
         setattr(elec_model, f"_{name}_interp", interpolant) 
     elec_model.max_capacity_As = cell.capacity_Ah * 3600 # Ah to As
 
+    # setup entropy coefficient function from entropy_df
+    thermal_model.entropy_coeff_func = cell.entropy_coeff_func
+
     
     return coupled_model.simulate(
         y0=y0,
@@ -62,10 +67,15 @@ def run_simulation_from_exp(
     )
 
 
-def main1(cycler_file, ocv_file, param_file):
-    exp_df = get_drive_cycle_df(cycler_file)
+def main1(cycler_file, ocv_file, param_file, entropy_file, **kwargs):
+    exp_df = get_drive_cycle_hours_col(cycler_file)
     ocv_df = pd.read_csv(ocv_file)
     param_df = pd.read_csv(param_file)
+    entropy_df = pd.read_csv(entropy_file)
+
+    #setup the coeff func
+    # sort the df by SOC to ensure the interpolation works correctly.
+    entropy_df = entropy_df.sort_values(by="SOC").reset_index(drop=True)
 
     mlp_cell = Cell(
         name="MLP001",
@@ -73,7 +83,8 @@ def main1(cycler_file, ocv_file, param_file):
         c = 42.9, # J K^-1
         h = 3.59, # J K^-1
         c_p = 887, # J kg^-1 K^-1
-        rho = 2682 # kg m^-3
+        rho = 2682, # kg m^-3,
+        entropy_coeff_func = lambda soc: np.interp(soc, entropy_df["SOC"].to_numpy(), entropy_df["Entropic_Coefficient"].to_numpy())
     )
 
 
@@ -81,11 +92,11 @@ def main1(cycler_file, ocv_file, param_file):
         exp_df=exp_df,
         ocv_df=ocv_df,
         param_df=param_df,
+        entropy_df=entropy_df,
         cell=mlp_cell,
         T_inf_degC=25,
         y0=[1.0, 0, 0, 25],
-        max_step = 10,  # seconds
-        pbar=True,
+        **kwargs
     )
     v_sim = model_results["v_cell"]
 
@@ -105,6 +116,9 @@ def main1(cycler_file, ocv_file, param_file):
         model_results["T"],
         label="Temperature (deg C)"
     )
+    plt.xlabel("Time (h)")
+    plt.ylabel("Temperature (deg C)")
+    plt.title("Temperature vs Time")
     plt.show()
 
 
@@ -115,6 +129,7 @@ if __name__ == "__main__":
     wltp_file = processed_data_dir / "MLP001_wltp_25degC_record.csv"
     param_file = processed_data_dir / "MLP001_params.csv"
     ocv_file = processed_data_dir / "MLP001_ocv.csv"
-    main1(cycler_file=wltp_file, ocv_file=ocv_file, param_file=param_file)
+    entropy_file = processed_data_dir / "entropydata_cell1.csv"
+    main1(cycler_file=wltp_file, ocv_file=ocv_file, param_file=param_file, entropy_file=entropy_file, verbose=False, pbar=True, max_step=1, atol=1e-6, rtol=1e-3,t_span=(0, 3600 * 20))
     
 
