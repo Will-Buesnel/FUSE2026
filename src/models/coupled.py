@@ -36,8 +36,6 @@ idk if it is necessary though.
 
 from typing import Callable
 
-from attr import attrs
-
 from models.electrical import ElectricalModel
 from models.base import BaseModel
 from scipy.integrate import solve_ivp
@@ -52,10 +50,11 @@ class ThermalModel(BaseModel):
     state_names = ["T"]
     required_attrs = ["c", "h", "T_inf_degK"]  # thermal mass, heat transfer coefficient, far-field temperature, cell temperature
 
-    def __init__(self, c: float, h: float, T_inf_degC: float):
+    def __init__(self, c: float, h: float, T_inf_degC: float, entropy_coeff_func: Callable | None = None):
         self.c = c
         self.h = h
         self.T_inf_degK = T_inf_degC + 273.15  # convert to Kelvin
+        self.entropy_coeff_func = entropy_coeff_func
 
     def derivative(self, t, y, I, R0, R1, R2, v_rc1, v_rc2, partial_voc_partial_T, verbose: bool = False):
         """
@@ -88,10 +87,10 @@ class CoupledModel(BaseModel):
         """
         if verbose:
             print(f"Computing partial V_oc / partial T at soc={soc}, T={T}")
-        return 0.0
+        return self.thermal_model.entropy_coeff_func(soc) if self.thermal_model.entropy_coeff_func is not None else 0.0
 
 
-    def rhs(self, t, y, current_func: Callable, verbose: bool = False, slow: bool = False):
+    def rhs(self, t, y, current_func: Callable|np.ndarray, verbose: bool = False, slow: bool = False):
 
         elec_state, thermal_state = self.unpack(y) 
         soc, v_rc1, v_rc2 = elec_state["soc"], elec_state["v_rc1"], elec_state["v_rc2"]
@@ -101,11 +100,18 @@ class CoupledModel(BaseModel):
         r0, r1, r2, c1, c2 = self.electrical_model.get_inter_params(soc, T, verbose)
 
         partial_voc_partial_T = self.partial_voc_partial_T(soc, T, verbose)
+
         # compute electrical derivatives:
-        dydt_elec = self.electrical_model.derivative(t, self.electrical_model.pack(soc=soc, v_rc1=v_rc1, v_rc2=v_rc2), current_func(t), T, (r0, r1, r2, c1, c2), verbose)
+        if callable(current_func):
+            current = current_func(t)
+        else:
+            current = current_func[np.searchsorted(current_func[:, 0], t, side="right") - 1, 1]  # get the current at time t from the array
+
+        dydt_elec = self.electrical_model.derivative(t, self.electrical_model.pack(soc=soc, v_rc1=v_rc1, v_rc2=v_rc2), current, T, (r0, r1, r2, c1, c2), verbose)
         if verbose:
             print(f"Electrical derivatives at t={t:.2f}s: {dydt_elec=}")
-        dydt_thermal = self.thermal_model.derivative(t, self.thermal_model.pack(T=T), current_func(t), r0, r1, r2, v_rc1, v_rc2, partial_voc_partial_T, verbose)
+
+        dydt_thermal = self.thermal_model.derivative(t, self.thermal_model.pack(T=T), current, r0, r1, r2, v_rc1, v_rc2, partial_voc_partial_T, verbose)
         if slow:
             time.sleep(1)  # slow down the simulation for visualization purposes
         # repack states:
@@ -129,7 +135,7 @@ class CoupledModel(BaseModel):
 
     def simulate(self,
                 y0: list[float]= [1, 0, 0, 25],  # default initial conditions: soc=1.0, v_rc1=0, v_rc2=0, T=25C
-                current_func: Callable = lambda t: 0.0,
+                current_func: Callable | np.ndarray = lambda t: 0.0,
                 t_max: float = 3600, # seconds
                 max_step: float = 0.5, # seconds, change
                 atol: float = 1e-6,
@@ -148,13 +154,15 @@ class CoupledModel(BaseModel):
         # check that all required attributes are set for both models
         _check_ready(self)
 
+        t_max = t_eval[-1] if t_eval is not None else t_max
+
         if verbose:
             print("Starting simulation with parameters:")
             print(f"  t_max: {t_max}")
             print(f"  max_step: {max_step}")
             print(f"  atol: {atol}")
             print(f"  rtol: {rtol}")
-
+        
         if pbar:
             pbar = tqdm(total=t_max, unit="s", desc="Simulating")
             last_t = [0.0]  # mutable container so the closure can update it
@@ -170,7 +178,6 @@ class CoupledModel(BaseModel):
             # first, pack states: 
             sol = solve_ivp(  # need to impl.
                 fun=sol_rhs,
-                t_span=(0.0, t_max),
                 y0=y0,
                 method="BDF",
                 max_step=max_step,
@@ -179,10 +186,11 @@ class CoupledModel(BaseModel):
                 t_eval=t_eval,
                 args=(current_func, verbose, slow),
                 dense_output=True,
+                **kwargs
             )
 
         finally:
-            if pbar:
+            if pbar is not None:
                 pbar.close()
 
         if not sol.success:
@@ -222,10 +230,10 @@ def _check_ready(self):
     )
 
 
-def _test_simulation(y0: list[float], current_func: Callable = lambda t: 0.0, t_max: float = 5.0, **kwargs):
+def test_simulation(y0: list[float], current_func: Callable | np.ndarray = lambda t: 0.0, t_max: float = 5.0, **kwargs):
     elec_model = ElectricalModel()
     # set interpolators for the electrical model
-    from parameters import get_all_parameter_interpolants
+    from models.parameters import get_all_parameter_interpolants
 
     param_file_path = "data/processed/MLP001_params.csv"
     ocv_file_path = "data/processed/MLP001_ocv.csv"
@@ -238,14 +246,32 @@ def _test_simulation(y0: list[float], current_func: Callable = lambda t: 0.0, t_
     
     elec_model.max_capacity_As = 2.2 * 3600  # 2.2 Ah in As
 
-    thermal_model = ThermalModel(c=100, h=10, T_inf=25)
+    thermal_model = ThermalModel(c=100, h=10, T_inf_degC=25)
     coupled_model = CoupledModel(elec_model, thermal_model)
-    res = coupled_model.simulate(**kwargs)
+    res = coupled_model.simulate(y0=y0, current_func=current_func, t_max=t_max, **kwargs)
     return res
+
+
+def test_simulation_param_interp_scheme(y0: list[float], current_func: Callable, t_max: float = 5.0, param_interpolants=None, **kwargs):
+    elec_model = ElectricalModel()
+
+    # set interpolators for the electrical model
+    for name, interpolant in param_interpolants.items():
+        name = name.split(" ")[0].split("[")[0].lower()  # take only the first part of the name, e.g. "R0 [Ohm]" -> "R0"
+        setattr(elec_model, f"_{name}_interp", interpolant)
+
+    
+    elec_model.max_capacity_As = 2.2 * 3600  # 2.2 Ah in As
+
+    thermal_model = ThermalModel(c=100, h=10, T_inf_degC=25)
+    coupled_model = CoupledModel(elec_model, thermal_model)
+    res = coupled_model.simulate(y0=y0, current_func=current_func, t_max=t_max, **kwargs)
+    return res
+
 
 if __name__ == "__main__":
     # test the coupled model with a simple simulation
-    res = _test_simulation(y0=[1, 0, 0, 25], current_func=lambda t: -1.0, t_max=1000.0, verbose=False, pbar=True)
+    res = test_simulation(y0=[1, 0, 0, 25], current_func=lambda t: -1.0, t_max=1000.0, verbose=False, pbar=True)
     # dummy plot of returned state variables over time:
     # plot v_cell, T, soc over time (on three separate axes)
     plt.figure(figsize=(10, 6))
