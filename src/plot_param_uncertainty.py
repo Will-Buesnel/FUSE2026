@@ -51,7 +51,7 @@ def main():
     plt.cla()
 
     # show a plot for the unstationary covariance function:
-    from local_stats import GibbsKernel
+    from models.local_stats import GibbsKernel
 
     # define a simple lengthscale function (e.g., linear function)
     def lengthscale_fn(X):

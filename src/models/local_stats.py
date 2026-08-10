@@ -98,6 +98,48 @@ def generate_length_scale_function(x: torch.Tensor, y: torch.Tensor, ell_min: fl
     return lengthscale_fn
 
 
+def create_posterior_distribution(kernel, X_train, y_train, X_star, noise_variance=1e-2):
+    """
+    Creates a posterior distribution for the Gaussian Process given training data.
+
+    Parameters:
+        kernel (GibbsKernel): The Gibbs kernel to use for the GP.
+        X_train (torch.Tensor): Training input data of shape (N, D).
+        y_train (torch.Tensor): Training output data of shape (N, 1).
+        X_star (torch.Tensor): Test input data of shape (M, D).
+        noise_variance (float): Variance of the observation noise.
+    """
+    K_xx = kernel(X_train, X_train)
+    K_xs = kernel(X_train, X_star)
+    K_ss = kernel(X_star, X_star)
+
+    L = torch.linalg.solve(K_xx + noise_variance * torch.eye(len(X_train)), K_xs)
+
+    posterior_cov = K_ss - K_xs.T @ L
+    alpha = torch.linalg.solve(K_xx + noise_variance * torch.eye(len(X_train)), y_train)
+
+    posterior_mean = K_xs.T @ alpha
+
+    return posterior_mean, posterior_cov
+
+
+def sample_from_posterior(posterior_mean, posterior_cov, num_samples=1):
+    """
+    Samples from the posterior distribution of the Gaussian Process.
+
+    Parameters:
+        posterior_mean (torch.Tensor): Mean of the posterior distribution of shape (M, 1).
+        posterior_cov (torch.Tensor): Covariance matrix of the posterior distribution of shape (M, M).
+        num_samples (int): Number of samples to draw from the posterior.
+
+    Returns:
+        torch.Tensor: Samples drawn from the posterior distribution of shape (num_samples, M).
+    """
+    mvn = dist.MultivariateNormal(posterior_mean.flatten(), covariance_matrix=posterior_cov)
+    samples = mvn.sample((num_samples,))
+    return samples
+
+
 
 def generate_length_scale_function1(x: torch.Tensor, y: torch.Tensor, ell_min: float = 1e-3, ell_max: float = 1e3, roughness: float = 1e-2,spline_s: float = 0.0) -> callable:
     x_np = x.numpy().reshape(-1)

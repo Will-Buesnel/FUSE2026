@@ -85,3 +85,15 @@ How do I get my prior distributions? resolution of meters?
 # Thermal model
 should temperature be in Kelvin or degrees?
 
+# Gaussian Process:
+
+not sure if my current implementation meets the correct objective of 'only realising the process once per iteration'.
+To meet this requirement, I still think we will need to interpolate again on the new function potentially?
+
+
+# Downsampling plan
+
+compare error at parameter-dataset given soc points, and then also at intepolated soc points. can use this to see if we need to decouple the error. 6, 2026
+
+
+https://lacerbi.github.io/blog/2024/vi-is-inference-is-optimization/

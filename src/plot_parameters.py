@@ -63,7 +63,7 @@ def main():
     ax_temp_r.legend(frameon=False, bbox_to_anchor=[1, 1, 0.60, 0])
     ax_temp_tau.legend(frameon=False, bbox_to_anchor=[1, 1, 0.60, 0])
 
-    plt.show()
+    plt.savefig(Path.cwd().resolve() / "data" / "processed" / "parameter_plots.pdf", dpi=300)
 
 if __name__ == "__main__":
     main()

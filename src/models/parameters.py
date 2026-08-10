@@ -14,6 +14,9 @@ import numpy as np
 import scipy.interpolate
 from pathlib import Path
 import pandas as pd
+import pyro.contrib.gp as gp
+import pyro.distributions as dist
+import torch
 
 class ParameterInterpolator:
     """Wraps a single parameter's SOC/T scattered data as a callable interpolator."""
@@ -41,7 +44,45 @@ class ParameterInterpolator:
             raise ValueError(f"ParameterInterpolator extrapolated at soc={soc}, T={T}")
         return result.reshape(soc_arr.shape)
     
-    
+class ParamFunction:
+    """
+    Includes a parameter Interpolator + a single realisation of a Gaussian
+    Process (unconditioned kernel) added on top, to represent one consistent
+    sample of parameter uncertainty across SOC for the whole simulation.
+    """
+
+    def __init__(self, socs, temps, values, prior_kernel, noise=1e-4):
+        self.interpolator = ParameterInterpolator(temps, socs, values)
+        self.prior_kernel = prior_kernel
+        self.noise = noise
+
+        self.reset_cov(temps, socs)
+        L = torch.linalg.cholesky(self.cov + noise * torch.eye(len(values)))
+        sampling_dist = dist.MultivariateNormal(
+            torch.zeros(len(values)), scale_tril=L
+        )
+
+        # Draw one realisation of the GP at the training grid points.
+        eps_sample = sampling_dist.sample().numpy()  # shape (len(values),)
+
+        # Build a second interpolator over the sampled GP offsets, so that
+        # __call__ can evaluate this realisation at any (soc, T).
+        self.eps_interpolator = ParameterInterpolator(temps, socs, eps_sample)
+
+    def set_eps_interpolator(self, temps, socs, eps_sample):
+        self.eps_interpolator = ParameterInterpolator(temps, socs, eps_sample)
+
+    def reset_cov(self, temps, socs):
+        self.cov = self.prior_kernel.forward(
+            torch.tensor(np.column_stack([temps, socs]), dtype=torch.float32)
+        )
+
+    def __call__(self, soc, T) -> float:
+        inter_value = self.interpolator(soc, T)
+        eps = self.eps_interpolator(soc, T)  # single GP realisation, interpolated
+        return inter_value + eps
+        
+
 def filter_outliers(df, param_cols, temp_col='Temperature_degC', soc_col='SOC',
                      window=5, z_thresh=3.0):
     """
@@ -91,6 +132,30 @@ def get_parameter_interpolant(df: pd.DataFrame, column_name: str, method="clough
     return {column_name: ParameterInterpolator(temps, socs, param, method=method)}
 
 
+def get_parameter_function(df: pd.DataFrame, column_name: str, prior_kernel, method="clough_tocher", noise=1e-4, variance=1e-4) -> ParamFunction:
+    """
+    Load parameter data from a CSV file and create a ParamFunction for the specified parameter.
+    The CSV file should have columns: 'Temperature_degC', 'SOC', 'R0 [Ohm]', 'R1 [Ohm]', 'R2 [Ohm]', 'tau1 [s]', 'tau2 [s]'.
+    The function will compute C1 and C2 from tau1/R1 and tau2/R2, respectively, and create ParamFunctions for R0, R1, R2, C1, and C2 as functions of SOC and Temperature.
+    Returns a dictionary of ParamFunction objects for each parameter.
+
+    Currently it uses the same interpolation method for all parameters.
+    """
+
+    # sort before building interpolants to make sure x is monotonically increasing for the parameter.
+    # this stops binary search from failing in the interpolator.
+    # the assumption is that the data is already sorted by temperature, then SOC, but this is a safety measure.
+    # another assummption is that all records are fully populated, which if not true would throw off the sorting and break the interpolator.
+    
+    sort_by = ["Temperature_degC", "SOC"]
+    df = df.sort_values(by=sort_by)
+    temps = df["Temperature_degC"].to_numpy()
+    socs = df["SOC"].to_numpy()
+    param = df[column_name].to_numpy()
+
+    return ParamFunction(socs, temps, param, prior_kernel, noise=noise)
+
+
 def get_all_parameter_interpolants(paramdf: pd.DataFrame, ocvdf: pd.DataFrame, method="clough_tocher") -> dict:
     # get interpolants for all parameters in the parameter dataframe
     param_cols = ["R0 [Ohm]", "R1 [Ohm]", "R2 [Ohm]", "tau1 [s]", "tau2 [s]"]
@@ -116,6 +181,15 @@ def format_interpolants(interpolants: dict) -> dict:
         formatted_interpolants[name] = interpolant
     return formatted_interpolants
 
+def create_interpolant_with_gibbs_gaussian_noise(x_train, y_train, lengthscale_fn, noise = 1e-4, variance=1e-4):
+    from models.local_stats import GibbsKernel, create_posterior_distribution, sample_from_posterior
+    # Create a Gibbs kernel with the provided lengthscale function
+    kernel = GibbsKernel(input_dim=1, lengthscale_fn=lengthscale_fn, variance=variance)
+    # Create the posterior distribution given the training data
+    posterior_mean, posterior_cov = create_posterior_distribution(kernel, x_train, y_train, x_train, noise_variance=noise)
+    # Sample from the posterior distribution to create a new interpolant
+    samples = sample_from_posterior(posterior_mean, posterior_cov, num_samples=1)
+    # Return a callable function that interpolates the samples
 
 def _test_get_all_parameter_interpolants():
     # Load the parameter data from the CSV file

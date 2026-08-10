@@ -165,8 +165,8 @@ class ElectricalModel(BaseModel):
     def get_inter_params(self, soc, T, verbose=False)-> tuple[float, float, float, float, float]:
         """Get the interpolated parameters r0, r1, r2, c1, c2 for the given soc and T."""
         # vectorised: soc, T can be scalars or arrays
-        if verbose:
-            print(f"Getting parameters for soc={soc}, T={T} deg C")
+        # if verbose:
+        #     print(f"Getting parameters for soc={soc}, T={T} deg C")
         r0 = self._r0_interp(soc, T)
         r1 = self._r1_interp(soc, T)
         r2 = self._r2_interp(soc, T)
@@ -174,8 +174,8 @@ class ElectricalModel(BaseModel):
         t2 = self._tau2_interp(soc, T)
         c1 = t1 / r1
         c2 = t2 / r2
-        if verbose:
-            print(f"r0={r0}, r1={r1}, r2={r2}, t1={t1}, t2={t2}")
+        # if verbose:
+        #     print(f"r0={r0}, r1={r1}, r2={r2}, t1={t1}, t2={t2}")
         return r0, r1, r2, t1, t2
 
     def _soc_ode(self, current):

@@ -95,7 +95,9 @@ class CoupledModel(BaseModel):
         elec_state, thermal_state = self.unpack(y) 
         soc, v_rc1, v_rc2 = elec_state["soc"], elec_state["v_rc1"], elec_state["v_rc2"]
         T = thermal_state["T"] # error is that thermal state is a dict with nothing in it.
-        
+        if verbose:
+            print("------------------------------")
+            print(f"At time {t:.2f}s: soc={soc:.4f}, v_rc1={v_rc1:.4f}V, v_rc2={v_rc2:.4f}V, T={T:.2f}°C")
         # get electricl interpolated parameters:
         r0, r1, r2, c1, c2 = self.electrical_model.get_inter_params(soc, T, verbose)
 
@@ -163,20 +165,20 @@ class CoupledModel(BaseModel):
             print(f"  atol: {atol}")
             print(f"  rtol: {rtol}")
         
-        if pbar:
-            pbar = tqdm(total=t_max, unit="s", desc="Simulating")
+        if pbar is True:
+            progbar = tqdm(total=t_max, unit="s", desc="Simulating")
             last_t = [0.0]  # mutable container so the closure can update it
 
             def sol_rhs(t, y, *args):
-                pbar.update(t - last_t[0])
+                progbar.update(t - last_t[0])
                 last_t[0] = t
                 return self.rhs(t, y, *args)
         else:
             sol_rhs = self.rhs
 
         try:
-            # first, pack states: 
-            sol = solve_ivp(  # need to impl.
+           
+            sol = solve_ivp(  
                 fun=sol_rhs,
                 y0=y0,
                 method="BDF",
@@ -190,8 +192,8 @@ class CoupledModel(BaseModel):
             )
 
         finally:
-            if pbar is not None:
-                pbar.close()
+            if pbar is True:
+                progbar.close()
 
         if not sol.success:
             raise RuntimeError(f"Integration failed: {sol.message}")
@@ -204,15 +206,16 @@ class CoupledModel(BaseModel):
         v_cell = self.electrical_model._v_cell(soc, T, current, r0, v_rc1, v_rc2)
 
         return {
-            "t": sol.t,
+            "t [s]": sol.t,
             "soc": soc,
-            "v_oc": self.electrical_model._ocv_interp(soc, T),
-            "v_rc1": v_rc1,
-            "v_rc2": v_rc2,
-            "v_cell": v_cell,
-            "T": T,
-            "r0": r0, "r1": r1, "r2": r2,
-            "c1": c1, "c2": c2,
+            "v_oc [V]": self.electrical_model._ocv_interp(soc, T),
+            "v_rc1 [V]": v_rc1,
+            "v_rc2 [V]": v_rc2,
+            "v_cell [V]": v_cell,
+            "T [°C]": T,
+            "r0 [Ohm]": r0, "r1 [Ohm]": r1, "r2 [Ohm]": r2,
+            "c1 [F]": c1, "c2 [F]": c2,
+            "I [A]": current
         }
     
 

@@ -15,14 +15,15 @@ from typing import List, Tuple
 import csv
 from pathlib import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+from collections.abc import Sequence
 
 
-def add_zoom_inset( 
+def add_zoom_inset(
         ax,
-        x1s: np.ndarray, # 1st dataset (model) to plot in the inset
-        y1s: np.ndarray,
-        x2s: np.ndarray, # 2nd dataset (experiment) to plot in the inset
-        y2s: np.ndarray,
+        xs: Sequence[np.ndarray],
+        ys: Sequence[np.ndarray],
+        colours: Sequence[str] | None = None,
+        alphas: Sequence[float] | None = None,
         x_range: tuple[float, float] = (1, 1.05),
         y_range: tuple[float, float] = (4.05, 4.125),
         inset_position: tuple[float, float, float, float] | None = None,
@@ -30,8 +31,26 @@ def add_zoom_inset(
         inset_width: str = "40%",
         inset_height: str = "40%",
 ):
-    """Add a zoomed-in inset view to the main voltage axis. This does not come from Mark's repo."""
-    bbox_to_anchor = inset_position if inset_position is not None else (0.1, 0.1, 1, 1)
+    """Add a zoomed-in inset view to the main voltage axis."""
+
+    if len(xs) != len(ys):
+        raise ValueError("xs and ys must contain the same number of datasets.")
+
+    if colours is None:
+        colours = [None] * len(xs)  # use matplotlib defaults
+
+    if len(colours) != len(xs):
+        raise ValueError("One colour must be provided for each dataset.")
+
+    if alphas is None:
+        alphas = [None] * len(xs)
+
+    if len(alphas) != len(xs):
+        raise ValueError("One alpha must be provided for each dataset.")
+
+    bbox_to_anchor = (
+        inset_position if inset_position is not None else (0.1, 0.1, 1, 1)
+    )
 
     axins = inset_axes(
         ax,
@@ -42,8 +61,8 @@ def add_zoom_inset(
         bbox_transform=ax.transAxes,
     )
 
-    axins.plot(x1s, y1s, color="k", lw=1)
-    axins.plot(x2s, y2s, color="tab:cyan", lw=1)
+    for x, y, c, a in zip(xs, ys, colours, alphas):
+        axins.plot(x, y, color=c, lw=1, alpha=a)
 
     axins.set_xlim(*x_range)
     axins.set_ylim(*y_range)
@@ -143,6 +162,120 @@ def convert_datetime_to_hours(df: pd.DataFrame, time_col: str = "Total Time") ->
     return hours
 
 
+def plot_matrix(
+    ax: plt.Axes,
+    fig: plt.Figure,
+    matrix: np.ndarray,
+    x_labels: list[str] | None = None,
+    y_labels: list[str] | None = None,
+    title: str | None = None,
+    cmap: str = "viridis",
+    save_name: str | None = None,
+):
+    """
+    Plot a matrix as a heatmap with optional labels and title.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    cax = ax.matshow(matrix, cmap=cmap)
+    fig.colorbar(cax)
+
+    if x_labels is not None:
+        ax.set_xticks(range(len(x_labels)))
+        ax.set_xticklabels(x_labels, rotation=90)
+
+    if y_labels is not None:
+        ax.set_yticks(range(len(y_labels)))
+        ax.set_yticklabels(y_labels)
+
+    if title is not None:
+        ax.set_title(title)
+
+    plt.tight_layout()
+
+    if save_name is not None:
+        plt.savefig(save_name)
+    else:
+        plt.show()
+
+
+def plot_2d_matrix(ys, std, soc_grid, temp_grid, train_X_2d, interp_r0, variance, noise):
+    import plotly.graph_objects as go
+    import numpy as np
+
+    griddims = np.sqrt(ys.shape[0]).astype(int)
+
+    mean_grid = ys.reshape(griddims, griddims).detach().numpy()
+    std_grid = std.reshape(griddims, griddims).detach().numpy()
+    soc_np = soc_grid.numpy()
+    temp_np = temp_grid.numpy()
+
+    fig = go.Figure()
+
+    # std surface (uncertainty)
+    fig.add_trace(go.Surface(
+        x=soc_np, y=temp_np, z=mean_grid, surfacecolor=std_grid,
+        colorscale="Magma", opacity=0.85, name="GP Posterior Uncertainty",
+        colorbar=dict(title="Uncertainty [Ohm]")
+    ))
+
+    # training points projected at z=interp_r0(train_X_2d[:, 0], train_X_2d[:, 1]).numpy()
+    fig.add_trace(go.Scatter3d(
+        x=train_X_2d[:, 0].numpy(),
+        y=train_X_2d[:, 1].numpy(),
+        z=interp_r0(train_X_2d[:, 0], train_X_2d[:, 1]).numpy(),
+        mode="markers",
+        marker=dict(size=4, color="cyan"),
+        name="Training points"
+    ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="SOC", yaxis_title="Temperature (°C)", zaxis_title="R0 [Ohm]",
+            # lock aspect ratio so zoom doesn't distort weirdly
+            aspectmode="cube",
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.2)  # starting zoom/angle
+            )
+        ),
+        title="GP Posterior Uncertainty over Continuous Grid",
+        width=900, height=700,
+        dragmode="orbit"  # or "turntable" - controls rotation behavior
+    )
+
+    # explicit scroll-zoom + toolbar config
+    fig.show(config={
+        "scrollZoom": True,
+        "displayModeBar": True,
+        "modeBarButtonsToAdd": ["zoom3d", "pan3d", "resetCameraDefault3d"]
+    })
+    lengthscale_desc = "ell(soc, temp) = 0.025 + 0.005·sigmoid(5000·(soc−0.3)) + 0.01·temp_norm"
+
+    annotation_text = (
+        f"Variance: {variance}<br>"
+        f"Noise: {noise}<br>"
+        f"Lengthscale fn: {lengthscale_desc}"
+    )
+
+    fig.update_layout(
+        annotations=[
+            dict(
+                text=annotation_text,
+                xref="paper", yref="paper",
+                x=0.01, y=0.01,          # bottom-left corner
+                xanchor="left", yanchor="bottom",
+                showarrow=False,
+                align="left",
+                font=dict(size=12),
+                bgcolor="rgba(255,255,255,0.7)",  # slight background so it's readable over the surface
+                bordercolor="black",
+                borderwidth=1
+            )
+        ]
+    )
+
+
+
 def get_ax(save: bool = False, n_axes: int = 1, **ax_kwargs):
     if save:
         matplotlib.use("pgf")
@@ -172,6 +305,14 @@ def get_ax(save: bool = False, n_axes: int = 1, **ax_kwargs):
 def make_plot(
         exp_df: pd.DataFrame,
         model_results: Tuple[np.ndarray, np.ndarray, np.ndarray],
+        colours: List[str] | None = None,
+        alphas: List[float] | None = None,
+        x_range: tuple[float, float] = (0.5, 0.55),
+        y_range: tuple[float, float] = (4.05, 4.125),
+        inset_position: tuple[float, float, float, float] | None = None,
+        inset_loc: str = "lower left",
+        inset_width: str = "40%",
+        inset_height: str = "40%",
         save_name: str | None = None,
 ):
     """
@@ -180,89 +321,87 @@ def make_plot(
     model_results: Tuple containing the model results (times, voltages, errors) The time for this should also be in hours to keep consistent.
     save_name: Optional name to save the plot. If None, the plot will be shown
     """
-    (ax_I, ax_v, ax_e), tidy_up = get_ax(
+    axes, tidy_up = get_ax(
         bool(save_name),
         n_axes=3,
         bottom_extra=0.35,
         l_margin=1.7,
     )
-    
+    for index, ax in enumerate(axes):
+        ax.set_xticks([])
 
-    ax_I.set_xticks([])
-    ax_v.set_xticks([])
-    ax_e.set_xticks([])
 
     # plot the applied current from the experiment
-    ax_I.plot(
+    axes[0].plot(
         exp_df["Elapsed Time[h]"],
         exp_df["Current(A)"],
         label="Applied Current",
         color="tab:green",
     )
-    ax_I.set_ylabel("Current (A)")
+    axes[0].set_ylabel("Current (A)")
 
     # plot experiment data
-    ax_v.plot(
+    axes[1].plot(
             exp_df["Elapsed Time[h]"],
             exp_df["Voltage(V)"],
             label="Experiment",
             color="tab:cyan",
         )
-    ax_v.set_ylabel("Voltage (V)")
+    axes[1].set_ylabel("Voltage (V)")
 
     # plot model data
     model_ts, model_vs, model_errors = model_results
-    ax_v.plot(
+    axes[1].plot(
             model_ts,
             model_vs,
             label="Model",
             color="k",
         )
-    ax_v.legend(frameon=False, loc="upper right")
+    axes[1].legend(frameon=False, loc="upper right")
     
     # plot errors, but in mV to make it more readable.
-    ax_e.plot(
+    axes[2].plot(
             model_ts,  
             model_errors * 1000,  # convert to mV
             label="Errors",
             color="tab:brown",
         )
-    ax_e.set_ylabel("Model error (mV)")
-    ax_e.set_xlabel("Time (h)")
+    axes[2].set_ylabel("Model error (mV)")
+    axes[2].set_xlabel("Time (h)")
     
     # plot xticks for the bottom axis only, and set the xlim to the same as the experiment data.
     xmin, xmax = exp_df["Elapsed Time[h]"].min(), exp_df["Elapsed Time[h]"].max()
 
     x_ticks = np.arange(np.floor(xmin), np.ceil(xmax) + 1, 5)
-    for ax in (ax_I, ax_v, ax_e):
+    for ax in (axes[0], axes[1], axes[2]):
         ax.set_xticks(x_ticks)
 
     # Then only show tick labels on the bottom axis:
-    for ax in (ax_I, ax_v, ax_e)[:-1]:
+    for ax in (axes[0], axes[1], axes[2])[:-1]:
         ax.tick_params(labelbottom=False)
     
     xmin, xmax = exp_df["Elapsed Time[h]"].min(), exp_df["Elapsed Time[h]"].max()
     xrange = xmax - xmin
     margin = 0.05  # 5%, matplotlib's default
 
-    for ax in (ax_I, ax_v, ax_e):
+    for ax in (axes[0], axes[1], axes[2]):
         ax.set_xlim(xmin - margin * xrange, xmax + margin * xrange)
 
     
-    ax_e.figure.align_ylabels([ax_I, ax_v, ax_e])  # align ylabels of all axes
+    axes[2].figure.align_ylabels([axes[0], axes[1], axes[2]])  # align ylabels of all axes
 
     add_zoom_inset(
-        ax_v,
-        model_ts,
-        model_vs,
-        exp_df["Elapsed Time[h]"].to_numpy(),
-        exp_df["Voltage(V)"].to_numpy(),
+        ax=axes[1],
+        xs=[model_ts,exp_df["Elapsed Time[h]"].to_numpy()],
+        ys=[model_vs,exp_df["Voltage(V)"].to_numpy()],
+        colours=["k", "tab:cyan"],
+        alphas=[1, 0.7],
         inset_position=[0.05, 0.05, 1, 1],
         x_range=(0.5, 0.55),
         y_range=(4.1, 4.2),
     )
 
-    ax_e.figure.subplots_adjust(left=0.15)
+    axes[2].figure.subplots_adjust(left=0.15)
     
     tidy_up(save_name)
 

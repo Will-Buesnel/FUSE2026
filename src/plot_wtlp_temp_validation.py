@@ -19,6 +19,7 @@ def run_simulation_from_exp(
         cell: Cell,
         T_inf_degC: float = 25.0,
         y0: list = [1,0,0,25], # default initial state: soc=1, v_rc1=0, v_rc2=0, T=25 deg C
+        evaluate_at_exp_times: bool = True,
         **kwargs
 ) -> dict:
     """
@@ -33,9 +34,9 @@ def run_simulation_from_exp(
     if "t_span" in kwargs:
         t_max = kwargs["t_span"][1]
     else:
-        t_max = exp_df["Elapsed Time[h]"].to_numpy()[-1] * 3600  # convert to seconds.
+        t_max = exp_df["deq_Elapsed Time[h]"].to_numpy()[-1] * 3600  # convert to seconds.
 
-    experiment_times = exp_df["Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds.
+    experiment_times = exp_df["deq_Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds.
     experiment_currents = -exp_df["Current(A)"].to_numpy() # flip sign of curret to match equations given.
 
 
@@ -57,6 +58,12 @@ def run_simulation_from_exp(
     # setup entropy coefficient function from entropy_df
     thermal_model.entropy_coeff_func = cell.entropy_coeff_func
 
+    if evaluate_at_exp_times:
+        experiment_times = exp_df["deq_Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds, sort
+        experiment_times = np.sort(experiment_times)
+        kwargs["t_eval"] = experiment_times
+        kwargs["t_span"] = (experiment_times[0], experiment_times[-1]) # set t_span to the start and end of the experiment times.
+
     
     return coupled_model.simulate(
         y0=y0,
@@ -67,7 +74,7 @@ def run_simulation_from_exp(
     )
 
 
-def main1(cycler_file, ocv_file, param_file, entropy_file, **kwargs):
+def main1(cycler_file, ocv_file, param_file, entropy_file, results_dir_filepath=None, **kwargs):
     exp_df = get_drive_cycle_hours_col(cycler_file)
     ocv_df = pd.read_csv(ocv_file)
     param_df = pd.read_csv(param_file)
@@ -98,38 +105,47 @@ def main1(cycler_file, ocv_file, param_file, entropy_file, **kwargs):
         y0=[1.0, 0, 0, 25],
         **kwargs
     )
-    v_sim = model_results["v_cell"]
+    v_sim = model_results["v_cell [V]"]
 
-    error = get_errors_by_resampling(
-        model_results["t"],
-        exp_df["Elapsed Time[h]"].to_numpy() * 3600,  # convert to seconds
-        exp_df["Voltage(V)"].to_numpy(),
-        v_sim,
-    )
-    make_plot(exp_df, (model_results["t"] * 1/3600, v_sim, error), save_name=None)
+    # error = get_errors_by_resampling(
+    #     model_results["t [s]"],
+    #     exp_df["deq_Elapsed Time[h]"].to_numpy() * 3600,  # convert to seconds
+    #     exp_df["Voltage(V)"].to_numpy(),
+    #     v_sim,
+    # )
+    #make_plot(exp_df, (model_results["t [s]"] * 1/3600, v_sim, error), save_name=None)
 
 
     # plot temperature vs time, for debugging purposes.
-    import matplotlib.pyplot as plt
-    plt.plot(
-        model_results["t"] * 1/3600,
-        model_results["T"],
-        label="Temperature (deg C)"
-    )
-    plt.xlabel("Time (h)")
-    plt.ylabel("Temperature (deg C)")
-    plt.title("Temperature vs Time")
-    plt.show()
+    # import matplotlib.pyplot as plt
+    # plt.plot(
+    #     model_results["t [s]"] * 1/3600,
+    #     model_results["T [°C]"],
+    #     label="Temperature (deg C)"
+    # )
+    # plt.xlabel("Time (h)")
+    # plt.ylabel("Temperature (deg C)")
+    # plt.title("Temperature vs Time")
+    # plt.show()
+
+    if results_dir_filepath:
+        # save the results to a csv file.
+        # model_results is a dictionary, so we can convert it to a dataframe and save it.
+        results_df = pd.DataFrame(model_results)
+        results_df.to_csv(results_dir_filepath / "_deterministic_wltp_results.csv", index=False)
+
 
 
 if __name__ == "__main__":
     root = Path.cwd().resolve()
     raw_data_dir = root / "data" / "raw"
     processed_data_dir = root / "data" / "processed"
-    wltp_file = processed_data_dir / "MLP001_wltp_25degC_record.csv"
+    wltp_file = processed_data_dir / "MLP001_wltp_25degC_record_deq.csv"
     param_file = processed_data_dir / "MLP001_params.csv"
     ocv_file = processed_data_dir / "MLP001_ocv.csv"
     entropy_file = processed_data_dir / "entropydata_cell1.csv"
-    main1(cycler_file=wltp_file, ocv_file=ocv_file, param_file=param_file, entropy_file=entropy_file, verbose=False, pbar=True, max_step=1, atol=1e-6, rtol=1e-3,t_span=(0, 3600 * 20))
+
+    results_dir = root / "data" / "results"
+    main1(cycler_file=wltp_file, ocv_file=ocv_file, param_file=param_file, entropy_file=entropy_file, results_dir_filepath=results_dir, verbose=False, pbar=True, max_step=1, atol=1e-6, rtol=1e-3, )
     
 
