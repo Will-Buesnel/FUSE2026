@@ -51,22 +51,8 @@ class ParamFunction:
     sample of parameter uncertainty across SOC for the whole simulation.
     """
 
-    def __init__(self, socs, temps, values, prior_kernel, noise=1e-4):
+    def __init__(self, socs, temps, values, eps_sample):
         self.interpolator = ParameterInterpolator(temps, socs, values)
-        self.prior_kernel = prior_kernel
-        self.noise = noise
-
-        self.reset_cov(temps, socs)
-        L = torch.linalg.cholesky(self.cov + noise * torch.eye(len(values)))
-        sampling_dist = dist.MultivariateNormal(
-            torch.zeros(len(values)), scale_tril=L
-        )
-
-        # Draw one realisation of the GP at the training grid points.
-        eps_sample = sampling_dist.sample().numpy()  # shape (len(values),)
-
-        # Build a second interpolator over the sampled GP offsets, so that
-        # __call__ can evaluate this realisation at any (soc, T).
         self.eps_interpolator = ParameterInterpolator(temps, socs, eps_sample)
 
     def set_eps_interpolator(self, temps, socs, eps_sample):
@@ -132,7 +118,7 @@ def get_parameter_interpolant(df: pd.DataFrame, column_name: str, method="clough
     return {column_name: ParameterInterpolator(temps, socs, param, method=method)}
 
 
-def get_parameter_function(df: pd.DataFrame, column_name: str, prior_kernel, method="clough_tocher", noise=1e-4, variance=1e-4) -> ParamFunction:
+def get_parameter_function(df: pd.DataFrame, column_name: str, eps_sample) -> ParamFunction:
     """
     Load parameter data from a CSV file and create a ParamFunction for the specified parameter.
     The CSV file should have columns: 'Temperature_degC', 'SOC', 'R0 [Ohm]', 'R1 [Ohm]', 'R2 [Ohm]', 'tau1 [s]', 'tau2 [s]'.
@@ -153,7 +139,7 @@ def get_parameter_function(df: pd.DataFrame, column_name: str, prior_kernel, met
     socs = df["SOC"].to_numpy()
     param = df[column_name].to_numpy()
 
-    return ParamFunction(socs, temps, param, prior_kernel, noise=noise)
+    return ParamFunction(socs, temps, param, eps_sample)
 
 
 def get_all_parameter_interpolants(paramdf: pd.DataFrame, ocvdf: pd.DataFrame, method="clough_tocher") -> dict:

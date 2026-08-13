@@ -156,7 +156,9 @@ class CoupledModel(BaseModel):
         # check that all required attributes are set for both models
         _check_ready(self)
 
-        t_max = t_eval[-1] if t_eval is not None else t_max
+        
+        t_span = t_eval[0], t_eval[-1] if t_eval is not None else (0, 1)
+        t_max = t_span[1]
 
         if verbose:
             print("Starting simulation with parameters:")
@@ -187,7 +189,7 @@ class CoupledModel(BaseModel):
                 rtol=rtol,
                 t_eval=t_eval,
                 args=(current_func, verbose, slow),
-                dense_output=True,
+                t_span=t_span,
                 **kwargs
             )
 
@@ -198,7 +200,6 @@ class CoupledModel(BaseModel):
         if not sol.success:
             raise RuntimeError(f"Integration failed: {sol.message}")
         
-        print("Simulation completed successfully.")
         soc, v_rc1, v_rc2, T = sol.y
         r0, r1, r2, c1, c2 = self.electrical_model.get_inter_params(soc, T, verbose) 
         current = current_func(sol.t)
@@ -213,8 +214,8 @@ class CoupledModel(BaseModel):
             "v_rc2 [V]": v_rc2,
             "v_cell [V]": v_cell,
             "T [°C]": T,
-            "r0 [Ohm]": r0, "r1 [Ohm]": r1, "r2 [Ohm]": r2,
-            "c1 [F]": c1, "c2 [F]": c2,
+            "R0 [Ohm]": r0, "R1 [Ohm]": r1, "R2 [Ohm]": r2,
+            "C1 [F]": c1, "C2 [F]": c2,
             "I [A]": current
         }
     

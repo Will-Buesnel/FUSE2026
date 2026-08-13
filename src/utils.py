@@ -15,6 +15,7 @@ from typing import List, Tuple
 import csv
 from pathlib import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+from matplotlib.widgets import Slider
 from collections.abc import Sequence
 
 
@@ -74,6 +75,47 @@ def add_zoom_inset(
     mark_inset(ax, axins, loc1=1, loc2=2, fc="none", ec="0.5")
     return axins
 
+def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value'):
+        """
+        Plot the parameter values against a given x value for each iteration of the inference process. This function is useful for visualizing how the parameter values evolve over iterations.
+        """
+        n_iterations = len(Ys)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        plt.subplots_adjust(bottom=0.25)  # leave room for the slider
+
+        # initial plot (iteration 0)
+        line, = ax.plot(xs, Ys[0, :], marker="o", label="Iteration 0")
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_ylim(Ys.min() * 0.95, Ys.max() * 1.05)
+        ax.legend()
+        ax.grid(True)
+
+        # slider axis
+        ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
+        slider = Slider(
+            ax=ax_slider,
+            label="Iteration",
+            valmin=0,
+            valmax=n_iterations - 1,
+            valinit=0,
+            valstep=1,
+        )
+
+        def update(val):
+            idx = int(slider.val)
+            line.set_ydata(Ys[idx, :])
+            line.set_label(f"Iteration {idx}")
+            ax.legend()
+            fig.canvas.draw_idle()
+
+        slider.on_changed(update)
+
+        plt.show()
+        return fig, slider  # return slider so it isn't garbage-collected in some environments
 
 def get_drive_cycle_hours_col(cycler_file: str) -> pd.DataFrame:
     drive_df = pd.read_csv(cycler_file)
