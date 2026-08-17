@@ -97,3 +97,11 @@ compare error at parameter-dataset given soc points, and then also at intepolate
 
 
 https://lacerbi.github.io/blog/2024/vi-is-inference-is-optimization/
+
+
+# Using the Likelihood function as a variational parameter.
+
+Is the model not going to want a likelihood function with more noise, because that means that the model results is more likely to be in the range of plausible values.
+It kind of goes back to how does the MonteCarlo evaluate success.
+
+i understand thought that having it as a varaitional parameter is good because it (could) show how much model error there is.. a least in a sense.

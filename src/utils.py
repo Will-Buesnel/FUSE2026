@@ -18,6 +18,25 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 from matplotlib.widgets import Slider
 from collections.abc import Sequence
 
+def set_rc_params():
+    """
+    Set the default rcParams for matplotlib to make plots look nicer.
+    """
+    plt.rcParams.update({
+        "font.size": 12,
+        "axes.labelsize": 14,
+        "axes.titlesize": 16,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 12,
+        "figure.titlesize": 16,
+        "figure.figsize": (8, 6),
+        "lines.linewidth": 2,
+        "lines.markersize": 6,
+        "axes.grid": True,
+        "grid.alpha": 0.5,
+        "grid.linestyle": "--",
+    })
 
 def add_zoom_inset(
         ax,

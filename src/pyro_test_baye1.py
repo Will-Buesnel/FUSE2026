@@ -11,29 +11,26 @@ import pandas as pd
 import numpy as np
 import torch
 from copy import deepcopy
+import matplotlib.pyplot as plt
 
 from models.coupled import CoupledModel, ThermalModel
 from models.electrical import ElectricalModel
 from models.parameters import get_all_parameter_interpolants, format_interpolants, get_parameter_function
+from utils import plot_traces
 from models.local_stats import GibbsKernel
-from cells import Cell
-
-
-import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
+from bin.cells import Cell
 
 import pyro.distributions as dist
-import pyro.distributions.transforms as transforms
 import pyro
 from pyro.infer import Predictive
 
 
 VAR_INITIAL_GUESS = 1e-7  # initial guess for the observation noise
 SIM_TIMESTEPS = 30000 # take this number of timesteps for the simulation. While we're setting it up we don't need all the timesteps.
-NUM_SAMPLES = 10 # number of samples to draw from the posterior distribution for the parameters.
-WARMUP_STEPS = 10 # number of warmup steps for MCMC inference.
-OBS_EPS = 1e-4 # observation noise for the likelihood function.
-_obs_scale = OBS_EPS**0.5 * torch.ones(SIM_TIMESTEPS)  # observation noise for the likelihood function, as a torch tensor. this is not currently used
+NUM_SAMPLES = 500 # number of samples to draw from the posterior distribution for the parameters.
+WARMUP_STEPS = 500 # number of warmup steps for MCMC inference.
+OBS_EPS = 1e-5 # observation noise for the likelihood function.
+_obs_scale = OBS_EPS**0.5 * torch.ones(SIM_TIMESTEPS)  # observation noise for the likelihood function, as a torch tensor. this is not currently used as obs_noise has become learnable parameter.
 
 
 class Simulator:
@@ -94,11 +91,11 @@ class Simulator:
             r0_values = [r0_func(soc, 25) for soc in socs]
             pyro.deterministic(f"{name}_values_at_25degC", torch.tensor(r0_values, dtype=torch.float32))  # record the parameter values at 25degC for debugging
 
+
     def set_current_func(self):
         self.set_current_func = lambda t: np.interp(t,
                                                     self.exp_df["Elapsed Time[h]"].to_numpy() * 3600,
                                                     -self.exp_df["Current(A)"].to_numpy()) # flip sign of current to match equations given.
-
 
 
     def run_simulation(self, **kwargs) -> dict:
@@ -140,15 +137,16 @@ def graph_model_outputs(sim: Simulator, gauss_interps: list[tuple[str, object]] 
 
 # PYRO INFERENCE MODEL AND GUIDE --------------------------
 
-
-param_interpolants_debug = [] # these need to be deepcopies 
+param_interpolants_debug = [] # these need to be deepcopies so that they don't change over time.
     
 def model(simulator: Simulator, obs=None):
     # assume y0 is already set before optimisation.
-    var_unconst = pyro.sample("u_unconstrained", dist.Normal(0., 1.))
+    var_unconst = pyro.sample("var_unconstrained", dist.Normal(0., 1.))
     var = torch.sigmoid(var_unconst) * 1e-4  # constrain variance to be positive and small
     pyro.deterministic("var", var)  # record the variance for debugging
-    obs_scale = pyro.sample("obs_scale", dist.LogNormal(torch.tensor(0.0), torch.tensor(0.01)))
+    obs_scale_unconst = pyro.sample("obs_scale_unconstrained", dist.LogNormal(0., 3))  # learnable observation noise for the likelihood function. This is a vector of length SIM_TIMESTEPS, one for each timestep.
+    obs_scale = torch.sigmoid(obs_scale_unconst) * 1e-2  # constrain the observation noise to be positive and small
+    pyro.deterministic("obs_scale", obs_scale)  # record the observation noise for debugging
 
 
     gauss_interps_q = [("R0 [Ohm]", {"lengthscale_func": lengthscale_func_2d, "variance": var})]  # variational parameters for the Gaussian noise
@@ -161,20 +159,10 @@ def model(simulator: Simulator, obs=None):
 
     pyro.sample(
     "obss",
-
     dist.Normal(output, obs_scale).to_event(1),
     obs=obs
 )
     
-
-def guide(simulator: Simulator, obs=None):
-    # regiter the variational parameter for the Gaussian noise with pyro.
-    # this is only required with differentiable inference methods.
-    var_q = pyro.sample("var_q", dist.LogNormal(torch.tensor(0.0), torch.tensor(1.0)), constraint=dist.constraints.positive)  # learnable parameter for observation noise
-    obs_scale_q = pyro.sample("obs_scale_q", dist.LogNormal(torch.tensor(0.0), torch.tensor(1.0)), constraint=dist.constraints.positive)  # learnable parameter for observation noise
-
-    gauss_interps_q = [("R0 [Ohm]", {"lengthscale_func": lengthscale_func_2d, "variance": var_q})]  # variational parameters for the Gaussian noise
-    simulator.set_gauss_interps(gauss_interps_q)  # set the gauss_interps for the simulator
 
 
 def run_inference_MCMC(simulator: Simulator, gauss_interps: list[tuple[str, object]] = None, obs=None, num_samples=1000, **kwargs):
@@ -202,7 +190,7 @@ def pyro_model_outputs(simulator: Simulator, gauss_interps: list[tuple[str, obje
     print("Generating posterior predictive plots...")
     # on axes 6, plot the v_cell against time uncertainty band
     pred = Predictive(model, posterior_samples=samples)
-    pred_values= pred(simulator, obs=None, **kwargs)  # shape (num_samples, num_timesteps)
+    pred_values = pred(simulator, obs=None, **kwargs)  # shape (num_samples, num_timesteps)
     print("MCMC inference completed. Samples obtained.")
 
     def plot_posterior(samples, obs_key="obss", param_name="eps_R0 [Ohm]_sample"):
@@ -219,7 +207,7 @@ def pyro_model_outputs(simulator: Simulator, gauss_interps: list[tuple[str, obje
 
         top_axes = fig.add_subplot(gs[0, :]) 
         bottom_axes = fig.add_subplot(gs[1, :])
-        socs = np.linspace(0.1, 1, 100)
+        socs = np.linspace(0.1, 1, len(mean))
         top_axes.plot(socs, mean, label="Mean Prediction")
         top_axes.fill_between(socs, lower, upper, alpha=0.3, label="90% CI")
         top_axes.set_ylabel("R0 [Ohm]")
@@ -247,56 +235,38 @@ def pyro_model_outputs(simulator: Simulator, gauss_interps: list[tuple[str, obje
         plt.tight_layout()
         plt.show()
 
+    #plot_posterior(pred_values, obs_key="obss", param_name="R0 [Ohm]_values_at_25degC")
 
-    def plot_resistance_traces(tested_socs: list = np.arange(0.1, 0.9, 0.05), test_temp: float = 25.0):
-        """
-        Plot R0 vs SOC for each iteration in param_interpolants_debug, with a slider
-        to step through iterations.
-        """
-        n_iterations = len(param_interpolants_debug)
-        traces = np.zeros((n_iterations, len(tested_socs)))
 
-        for iteration_index, interpolant in enumerate(param_interpolants_debug):
-            r0_func = interpolant["R0 [Ohm]"]
-            traces[iteration_index, :] = [r0_func(soc, test_temp) for soc in tested_socs]
+    r0s_at_25degC = np.array([[interpolant["R0 [Ohm]"](soc, 25) for soc in np.linspace(0.1, 1, 20)] for interpolant in param_interpolants_debug])
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        plt.subplots_adjust(bottom=0.25)  # leave room for the slider
+    # observation noises for the likelihood function - want to plot how the distribution changes over time.
+ 
+    plot_traces(xs = np.linspace(0.1,1,20), Ys=r0s_at_25degC, title="R0 vs SOC at 25degC", xlabel="SOC", ylabel="R0 [Ohm]")
+    print(samples.keys())
+    plot_posterior(pred_values, obs_key="obss", param_name="eps_R0 [Ohm]_sample")
 
-        # initial plot (iteration 0)
-        line, = ax.plot(tested_socs, traces[0, :], marker="o", label="Iteration 0")
+    fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+    const_noises = pred_values["obs_scale"].detach().numpy()
+    unconst_noises = samples["obs_scale_unconstrained"].detach().numpy()
 
-        ax.set_xlabel("SOC")
-        ax.set_ylabel("R0 [Ohm]")
-        ax.set_title(f"R0 vs SOC at {test_temp}°C")
-        ax.set_ylim(traces.min() * 0.95, traces.max() * 1.05)
-        ax.legend()
-        ax.grid(True)
+    const_variance = pred_values["var"].detach().numpy()
+    unconst_variance = samples["var_unconstrained"].detach().numpy()
 
-        # slider axis
-        ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
-        slider = Slider(
-            ax=ax_slider,
-            label="Iteration",
-            valmin=0,
-            valmax=n_iterations - 1,
-            valinit=0,
-            valstep=1,
-        )
+    for ax, data, title in zip(axs.flatten(),
+                                [const_noises, unconst_noises, const_variance, unconst_variance],
+                                  ["Learned Observation Noise", "Unconstrained Observation Noise", 
+                                   "Learned Variance", "Unconstrained Variance"]):
+        ax.plot(data)
+        ax.set_title(title)
+        ax.set_xlabel("Sample Index")
+        ax.set_ylabel("Value")
 
-        def update(val):
-            idx = int(slider.val)
-            line.set_ydata(traces[idx, :])
-            line.set_label(f"Iteration {idx}")
-            ax.legend()
-            fig.canvas.draw_idle()
+    fig.suptitle("Trace Plots for variational parameters")
+    plt.tight_layout()
+    plt.show()
 
-        slider.on_changed(update)
-
-        plt.show()
-        return fig, slider  # return slider so it isn't garbage-collected in some environments
-    plot_posterior(pred_values, obs_key="obss", param_name="R0 [Ohm]_values_at_25degC")
-    plot_resistance_traces()
+# ----------------------------------------------------------
 
 if __name__ == "__main__":
      

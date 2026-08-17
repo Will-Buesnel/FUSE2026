@@ -8,7 +8,7 @@ from models.coupled import CoupledModel, ThermalModel
 from models.electrical import ElectricalModel
 from models.parameters import get_all_parameter_interpolants, format_interpolants
 from utils import get_drive_cycle_hours_col, make_plot, get_errors_by_resampling
-from cells import Cell
+from bin.cells import Cell
 import matplotlib.pyplot as plt
 
 def run_simulation_from_exp(
