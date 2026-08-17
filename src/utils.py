@@ -94,6 +94,22 @@ def add_zoom_inset(
     mark_inset(ax, axins, loc1=1, loc2=2, fc="none", ec="0.5")
     return axins
 
+def get_path_to_data_processed_dir() -> Path:
+    """
+    Get the path to the data/processed directory, which is assumed to be two levels up from this file.
+    """
+    current_file_path = Path(__file__).resolve()
+    data_processed_dir = current_file_path.parents[1] / "data" / "processed"
+    return data_processed_dir
+
+def get_path_to_data_results_dir() -> Path:
+    """
+    Get the path to the data/results directory, which is assumed to be two levels up from this file.
+    """
+    current_file_path = Path(__file__).resolve()
+    data_results_dir = current_file_path.parents[1] / "data" / "results"
+    return data_results_dir
+
 def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value'):
         """
         Plot the parameter values against a given x value for each iteration of the inference process. This function is useful for visualizing how the parameter values evolve over iterations.

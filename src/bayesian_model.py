@@ -14,7 +14,7 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 
 from models.parameters import get_all_parameter_interpolants
-from utils import plot_traces, set_rc_params
+from utils import plot_traces, set_rc_params, get_path_to_data_results_dir, get_path_to_data_processed_dir
 from simulation import Simulator, Cell
 import time
 
@@ -240,10 +240,10 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 if __name__ == "__main__":
      
     set_rc_params()  # set the rc params for plotting
-    samples = generate_sample_test(warmup_steps=5, num_samples=5, num_chains=3)  # generate samples from the model using MCMC inference
-    save_pred_samples_to_pt(samples, "pred_samples_uniform_dists_wider_range.pt", with_time=False)  # save the samples to a .pt file
+    samples = generate_sample_test(warmup_steps=5, num_samples=5, num_chains=1)  # generate samples from the model using MCMC inference
+    save_pred_samples_to_pt(samples, get_path_to_data_results_dir() / "pred_samples_uniform_dists_wider_range.pt", with_time=False)  # save the samples to a .pt file
 
     # read the samples back in and convert to pandas dataframe
-    samples_df = open_pred_samples_as_df("pred_samples_uniform_dists_wider_range.pt", drop_index=True)
+    samples_df = open_pred_samples_as_df(get_path_to_data_results_dir() / "pred_samples_uniform_dists_wider_range.pt", drop_index=True)
     plot_mixing(samples_df, param_names=["obs_scale", "var"])  # plot the mixing of the R0 parameter
     
