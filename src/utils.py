@@ -38,6 +38,19 @@ def set_rc_params():
         "grid.linestyle": "--",
     })
 
+def plot_df(df: pd.DataFrame, title: str = "Data Overview", xlabel: str = "Index", ylabel: str = "Value") -> None:
+    # plot every column in the dataframe on a separate subplot, sharing the x-axis
+    n_cols = len(df.columns)
+    fig, axes = plt.subplots(nrows=n_cols, ncols=1, sharex=True, figsize=(10, 2 * n_cols))
+    print(df.columns)
+    print(f"Plotting {n_cols} columns from dataframe with shape {df.shape}")
+    for i, col in enumerate(df.columns):
+        axes[i].plot(df[col], label=col)
+        axes[i].set_ylabel(col)
+        axes[i].legend()
+    axes[-1].set_xlabel("Index")
+    plt.show()
+
 def add_zoom_inset(
         ax,
         xs: Sequence[np.ndarray],

@@ -132,7 +132,49 @@ class CoupledModel(BaseModel):
         elec_state = self.electrical_model.unpack(y[:elec_state_size])
         thermal_state = self.thermal_model.unpack(y[elec_state_size:])
         return elec_state, thermal_state
-    
+
+    def _get_sol_solveivp(rhs_func: Callable,
+                           y0, method: str, max_step, atol,
+                            rtol, t_eval, args: tuple, t_span, **kwargs
+                            ):
+        
+        return solve_ivp(  
+                        fun=rhs_func,
+                        y0=y0,
+                        method=method,
+                        max_step=max_step,
+                        atol=atol,
+                        rtol=rtol,
+                        t_eval=t_eval,
+                        args=args,
+                        t_span=t_span,
+                        **kwargs
+        )
+
+    def _get_sol_diffrax(rhs_func: Callable,
+                           y0, method: str, max_step, atol,
+                            rtol, t_eval, args: tuple, t_span, **kwargs
+                            ):
+
+        current_func, verbose, slow = args
+        def rhs(t, y, args):
+            return rhs_func(t, y, current_func, verbose, slow)
+
+
+        return dx.diffeqsolve(
+            dx.ODETerm(rhs),
+            dx.Kvaerno5(),
+            t0=t_span[0],
+            t1=t_span[1],
+            dt0=max_step,
+            y0=y0,
+            args=(current_func, verbose, slow),
+            saveat=dx.SaveAt(ts=t_eval),
+            stepsize_controller=dx.PIDController(
+                rtol=rtol,
+                atol=atol,
+            ),
+        )
         
 
     def simulate(self,

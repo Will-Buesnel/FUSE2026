@@ -14,14 +14,17 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 
 from models.parameters import get_all_parameter_interpolants
-from utils import plot_traces, set_rc_params, get_path_to_data_results_dir, get_path_to_data_processed_dir
+from utils import plot_traces, set_rc_params, get_path_to_data_results_dir, get_path_to_data_processed_dir, plot_df
 from simulation import Simulator, Cell
 import time
 
 import pyro.distributions as dist
 import pyro
 from pyro.infer import Predictive
-
+import torch
+from pyro.infer import MCMC
+from pyro.infer.mcmc.util import diagnostics as pyro_diagnostics
+from pyro.ops.stats import effective_sample_size, split_gelman_rubin
 
 VAR_INITIAL_GUESS = 1e-7  # initial guess for the observation noise
 SIM_TIMESTEPS = 30000 # take this number of timesteps for the simulation. While we're setting it up we don't need all the timesteps.
@@ -66,7 +69,9 @@ param_interpolants_debug = [] # these need to be deepcopies so that they don't c
     
 def model(simulator: Simulator, obs=None):
     # assume y0 is already set before optimisation.
-    var = pyro.sample("var", dist.Uniform(0., 1e-4))
+
+    var_scaled = pyro.sample("var_scaled", dist.HalfNormal(1.0))  # order-1 scale
+    var = pyro.deterministic("var", var_scaled * 1e-6)
     obs_scale = pyro.sample("obs_scale", dist.Uniform(0., 1e-2))
 
     gauss_interps_q = [("R0 [Ohm]", {"lengthscale_func": lengthscale_func_2d, "variance": var})]  # variational parameters for the Gaussian noise
@@ -90,7 +95,7 @@ def run_inference_MCMC(simulator: Simulator, obs=None, warmup_steps=100, num_sam
 
     num_chains = kwargs.get("num_chains", 1)  # default to 1 chain if not specified.
 
-    kernel = RandomWalkKernel(model=model)  
+    kernel = RandomWalkKernel(model=model)  # use a random walk kernel for MCMC inference
     mcmc = MCMC(kernel, num_samples=num_samples, warmup_steps=warmup_steps, num_chains=num_chains)
     mcmc.run(simulator, obs=obs, **kwargs)
     return mcmc
@@ -101,6 +106,26 @@ def check_pyro_params():
         print(name, value, value.grad if hasattr(value, 'grad') else 'no grad attr')
 
 
+def compute_diag_stats_on_samples(samples: pd.DataFrame, extra_exclude_cols=None, verbose=False):
+    results = {}
+    exclude = ("Chain", "Iteration") + (extra_exclude_cols if extra_exclude_cols is not None else ())
+    param_cols = [c for c in samples.columns if c not in exclude]
+
+    for param in param_cols:
+        pivoted = samples.pivot(index="Iteration", columns="Chain", values=param)
+        if verbose:
+            print(f"Pivoted samples for {param}:\n{pivoted.head()}")
+        stacked = torch.tensor(pivoted.values.T, dtype=torch.float32)
+
+        results[param] = {
+            "r_hat": split_gelman_rubin(stacked).item(),
+            "n_eff": effective_sample_size(stacked).item(),
+        }
+
+    results_df = pd.DataFrame(results).T
+    print(results_df)
+
+
 def pyro_model_sample(simulator: Simulator, obs=None,warmup_steps=100, num_samples=1000, num_chains=1, **kwargs):
     all_samples = []
     # run the inference using MCMC
@@ -109,7 +134,7 @@ def pyro_model_sample(simulator: Simulator, obs=None,warmup_steps=100, num_sampl
         mcmc = run_inference_MCMC(simulator=simulator, obs=obs, warmup_steps=warmup_steps, num_samples=num_samples, **kwargs)
         all_samples.append(mcmc.get_samples())
 
-    return all_samples
+    return all_samples, mcmc
 
 
 def pyro_model_predict(simulator: Simulator, samples, obs=None, **kwargs):
@@ -148,10 +173,18 @@ def save_pred_samples_to_pt(samples, filename, with_time=True):
         filename = filename.replace(".pt", f"_{time.strftime('%Y%m%d_%H%M%S')}.pt")
     torch.save(samples, filename)
 
+def save_diagnostics_to_csv(mcmc, filename, with_time=True):
+    if with_time:
+        filename = filename.replace(".csv", f"_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    diagnostics = mcmc.diagnostics()
+    diagnostics_df = pd.DataFrame(diagnostics)
+    diagnostics_df.to_csv(filename, index=False)
+
 def _open_pred_samples_from_pt(filename):
     return torch.load(filename)
 
 def _convert_pred_samples_to_df(samples_by_chain, drop_index=True):
+    
     # convert to pandas dataframe
     # tensor will be of shape (num_chains, num_samples, num_timesteps)
     parameter_names = list(samples_by_chain[0].keys())
@@ -188,6 +221,10 @@ def lengthscale_func_2d(x):
         temp = x[:, 1]  # raw temperature, e.g. 5-40
         return 0.0025 + 0.0005 * torch.sigmoid(5000 * (soc - 0.3)) + 0.5 * temp
 
+def get_diagnostics_from_csv(filename):
+    diagnostics_df = pd.read_csv(filename)
+    return diagnostics_df
+
 
 # ----------------------------------------------------------
 
@@ -204,7 +241,9 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 
 
     # take only the first x records
-    wltp_df = wltp_df.iloc[:30000, :]
+    wltp_df = wltp_df.iloc[START_IDX:STOP_IDX, :]
+    print(wltp_df.head())
+    print(wltp_df.tail())
 
     def entropy_coeff_func(soc):
         return np.interp(soc, entropy_df["SOC"].to_numpy(), entropy_df["Entropic_Coefficient"].to_numpy())
@@ -236,14 +275,21 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 
     return pyro_model_sample(simulator=sim, obs=observed_values, warmup_steps=warmup_steps, num_samples=num_samples, num_chains=num_chains)
     
+START_IDX = 8500
+STOP_IDX = 12000
+
 
 if __name__ == "__main__":
+    
      
     set_rc_params()  # set the rc params for plotting
-    samples = generate_sample_test(warmup_steps=5, num_samples=5, num_chains=1)  # generate samples from the model using MCMC inference
+    samples, mcmc = generate_sample_test(warmup_steps=2000, num_samples=2000, num_chains=2)  # generate samples from the model using MCMC inference
+    print(f"MCMC diagnostics: {mcmc.diagnostics()}")  # print the diagnostics of the MCMC inference
     save_pred_samples_to_pt(samples, get_path_to_data_results_dir() / "pred_samples_uniform_dists_wider_range.pt", with_time=False)  # save the samples to a .pt file
+    save_diagnostics_to_csv(mcmc, get_path_to_data_results_dir() / "diagnostics_uniform_dists_wider_range.csv", with_time=False)  # save the diagnostics to a .csv file
 
     # read the samples back in and convert to pandas dataframe
     samples_df = open_pred_samples_as_df(get_path_to_data_results_dir() / "pred_samples_uniform_dists_wider_range.pt", drop_index=True)
-    plot_mixing(samples_df, param_names=["obs_scale", "var"])  # plot the mixing of the R0 parameter
-    
+    plot_mixing(samples_df, param_names=["obs_scale", "var_scaled"])  # plot the mixing of the R0 parameter
+    # print(samples_df.head())  # print the first few rows of the samples dataframe
+    compute_diag_stats_on_samples(samples_df, verbose=False, extra_exclude_cols=("eps_R0 [Ohm]_standardised",))  # compute the diagnostics of the samples
