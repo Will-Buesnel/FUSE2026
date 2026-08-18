@@ -69,10 +69,12 @@ class Simulator:
 
 
     def set_current_func(self):
-        self.set_current_func = lambda t: np.interp(t,
-                                                    self.exp_df["Elapsed Time[h]"].to_numpy() * 3600,
-                                                    -self.exp_df["Current(A)"].to_numpy()) # flip sign of current to match equations given.
-        
+        self.current_time = self.exp_df["Elapsed Time[h]"].to_numpy() * 3600
+        self.current = -self.exp_df["Current(A)"].to_numpy()
+
+
+    def current_func(self, t):
+        return np.interp(t, self.current_time, self.current)
 
     def run_simulation(self, **kwargs) -> dict:
         
@@ -82,7 +84,7 @@ class Simulator:
 
         return self.coupled_model.simulate(
             t_max=self.exp_df["Elapsed Time[h]"].to_numpy()[-1] * 3600,  # convert to seconds.
-            current_func = self.set_current_func,
+            current_func = self.current_func,
             **kwargs
         )
 
@@ -111,3 +113,11 @@ class Cell:
         self.T_inf_degC = T_inf_degC # this isn't stricly a cell-related attribute, but its easy to have here and I view it as a property of the cell in the context of a given experiment.
         self.volume = volume
         self.entropy_coeff_func = entropy_coeff_func
+
+class EntropyCoeffFunc:
+    def __init__(self, entropy_df):
+        self.soc = entropy_df["SOC"].to_numpy()
+        self.coeff = entropy_df["Entropic_Coefficient"].to_numpy()
+
+    def __call__(self, soc):
+        return np.interp(soc, self.soc, self.coeff)
