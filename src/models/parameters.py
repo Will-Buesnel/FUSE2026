@@ -177,6 +177,15 @@ def create_interpolant_with_gibbs_gaussian_noise(x_train, y_train, lengthscale_f
     samples = sample_from_posterior(posterior_mean, posterior_cov, num_samples=1)
     # Return a callable function that interpolates the samples
 
+def get_initial_soc(initial_v_cell: float, initial_temp: float, ocv_df: pd.DataFrame) -> float:
+    # construct an interpolater to go backwards to normal. I.e. instead of soc -> ocv, we want ocv -> soc.
+    # since this will only be done at steady states (i.e. where current is = dvdt = 0 for an extending period of time), I can assume v_cell == v_ocv.
+    ocv_interpolator = ParameterInterpolator(ocv_df["Temperature_degC"].to_numpy(),
+                                             ocv_df["OCV[V]"].to_numpy(),
+                                                ocv_df["SOC"].to_numpy())
+
+    return ocv_interpolator(initial_v_cell, initial_temp)  # returns the initial SOC corresponding to the initial cell voltage and temperature
+
 def _test_get_all_parameter_interpolants():
     # Load the parameter data from the CSV file
     param_file_path = "data/processed/MLP001_params.csv"
@@ -201,48 +210,10 @@ def _test_get_all_parameter_interpolants():
             print(f"  {name}: {value}")
 
 
-def _test_filter_outliers():
-    # Load the parameter data from the CSV file
-    param_file_path = "data/processed/MLP001_params.csv"
-    df = pd.read_csv(param_file_path)
-
-    # Define the parameter columns to check for outliers
-    param_cols = ["R0 [Ohm]", "R1 [Ohm]", "R2 [Ohm]", "tau1 [s]", "tau2 [s]"]
-
-    # Filter out outliers
-    filtered_df = filter_outliers(df, param_cols, z_thresh=3.0)
-
-    # Print the number of rows before and after filtering
-    print(f"Original number of rows: {len(df)}")
-    print(f"Number of rows after filtering: {len(filtered_df)}")
-
-    # check one known previously problematic point, which was an outlier in the R1 parameter at T=25, SOC=0.6
-    print(f"0.6113564957494135 in filtered_df['SOC'].values: {0.6113564957494135 in filtered_df['SOC'].values}")  # should be False now
-
-
-def _test_delaunay():
-    """
-    Test Delaunay triangulation on the parameter data.
-    This is to check how well structured the parameter data is for Clough-Tocher interpolation.
-    """
-    from scipy.spatial import Delaunay
-    # Load the parameter interpolants from the CSV file
-    param_file_path = "data/processed/MLP001_params.csv"
-    df = filter_outliers(pd.read_csv(param_file_path), ["R0 [Ohm]", "R1 [Ohm]", "R2 [Ohm]", "tau1 [s]", "tau2 [s]"])
-    points = np.column_stack([df["SOC"].to_numpy(), df["Temperature_degC"].to_numpy()])
-    delaunay = Delaunay(points)
-
-    queries = np.array([[0, 25], [0.6,25], [1, 25]]) # try three cases
-    simplices = delaunay.find_simplex(queries)
-   
-    for simplex, query in zip(simplices, queries):
-        if simplex == -1:
-            print(f"Query point {query} is outside the convex hull of the data.")
-        else:
-            verts = delaunay.simplices[simplex]
-            print(f"Query point {query} is inside simplex {simplex}.")
-            print("triangle vertices (SOC,T):", points[verts])
-            
+def map_param_space_onto_grid(param_df):
+    '''Map the entire parameter space onto a grid of SOC and Temperature values.
+    This is so we can use a grid interpolator.
+    '''
 
 if __name__ == "__main__":
     _test_get_all_parameter_interpolants()

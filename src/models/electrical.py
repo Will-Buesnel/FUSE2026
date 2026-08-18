@@ -185,7 +185,7 @@ class ElectricalModel(BaseModel):
     def _v_cell(self, soc, T, current, r0, v_rc1, v_rc2):
         voc = self._ocv_interp(soc, T)
         return voc - current * r0 - v_rc1 - v_rc2
-    
+
 
 def _test_derivative_func():
     """Test the derivative function of the ElectricalModel class."""

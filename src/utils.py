@@ -107,6 +107,8 @@ def add_zoom_inset(
     mark_inset(ax, axins, loc1=1, loc2=2, fc="none", ec="0.5")
     return axins
 
+
+# -------PATH UTILS--------------------------------------------------------------_----
 def get_path_to_data_processed_dir() -> Path:
     """
     Get the path to the data/processed directory, which is assumed to be two levels up from this file.
@@ -122,6 +124,17 @@ def get_path_to_data_results_dir() -> Path:
     current_file_path = Path(__file__).resolve()
     data_results_dir = current_file_path.parents[1] / "data" / "results"
     return data_results_dir
+
+def get_path_to_data_dir() -> Path:
+    """
+    Get the path to the data directory, which is assumed to be two levels up from this file.
+    """
+    current_file_path = Path(__file__).resolve()
+    data_dir = current_file_path.parents[1] / "data"
+    return data_dir
+
+#  -----------------------------------------------------------------------------------
+
 
 def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value'):
         """
@@ -164,6 +177,7 @@ def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces O
 
         plt.show()
         return fig, slider  # return slider so it isn't garbage-collected in some environments
+
 
 def get_drive_cycle_hours_col(cycler_file: str) -> pd.DataFrame:
     drive_df = pd.read_csv(cycler_file)
@@ -219,7 +233,6 @@ def dequantise_data(time: np.ndarray, pbar: bool = False) -> Tuple[np.ndarray, n
             progress.close()
 
     return time
-
 
 
 def incomplete_get_errors_by_dequantisation(model_ts, experiment_times, experiment_voltages, model_voltages) -> np.ndarray:
@@ -420,10 +433,10 @@ def make_plot(
     for index, ax in enumerate(axes):
         ax.set_xticks([])
 
-
+    model_ts, model_vs, model_errors = model_results
     # plot the applied current from the experiment
     axes[0].plot(
-        exp_df["Elapsed Time[h]"],
+        exp_df["deq_Elapsed Time[h]"],
         exp_df["Current(A)"],
         label="Applied Current",
         color="tab:green",
@@ -432,7 +445,7 @@ def make_plot(
 
     # plot experiment data
     axes[1].plot(
-            exp_df["Elapsed Time[h]"],
+            exp_df["deq_Elapsed Time[h]"],
             exp_df["Voltage(V)"],
             label="Experiment",
             color="tab:cyan",
@@ -460,7 +473,7 @@ def make_plot(
     axes[2].set_xlabel("Time (h)")
     
     # plot xticks for the bottom axis only, and set the xlim to the same as the experiment data.
-    xmin, xmax = exp_df["Elapsed Time[h]"].min(), exp_df["Elapsed Time[h]"].max()
+    xmin, xmax = exp_df["deq_Elapsed Time[h]"].min(), exp_df["deq_Elapsed Time[h]"].max()
 
     x_ticks = np.arange(np.floor(xmin), np.ceil(xmax) + 1, 5)
     for ax in (axes[0], axes[1], axes[2]):
@@ -470,7 +483,7 @@ def make_plot(
     for ax in (axes[0], axes[1], axes[2])[:-1]:
         ax.tick_params(labelbottom=False)
     
-    xmin, xmax = exp_df["Elapsed Time[h]"].min(), exp_df["Elapsed Time[h]"].max()
+    xmin, xmax = exp_df["deq_Elapsed Time[h]"].min(), exp_df["deq_Elapsed Time[h]"].max()
     xrange = xmax - xmin
     margin = 0.05  # 5%, matplotlib's default
 
@@ -482,7 +495,7 @@ def make_plot(
 
     add_zoom_inset(
         ax=axes[1],
-        xs=[model_ts,exp_df["Elapsed Time[h]"].to_numpy()],
+        xs=[model_ts,exp_df["deq_Elapsed Time[h]"].to_numpy()],
         ys=[model_vs,exp_df["Voltage(V)"].to_numpy()],
         colours=["k", "tab:cyan"],
         alphas=[1, 0.7],

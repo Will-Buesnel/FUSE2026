@@ -9,7 +9,7 @@ import numpy as np
 from scipy.signal import savgol_filter
 from pathlib import Path
 import pandas as pd
-from plot_wtlp_temp_validation import run_simulation_from_exp
+from bin.plot_wtlp_temp_validation import run_simulation_from_exp
 
 def find_steady_states(experiment_data, window_size=100, threshold=1e-3):
 

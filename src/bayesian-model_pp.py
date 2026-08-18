@@ -17,6 +17,7 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 
 from models.parameters import get_all_parameter_interpolants
+from models.local_stats import AdaptiveMetropolisHastings
 from utils import plot_traces, set_rc_params, get_path_to_data_results_dir, get_path_to_data_processed_dir, plot_df
 from simulation import Simulator, Cell, EntropyCoeffFunc
 import time
@@ -97,7 +98,7 @@ def run_inference_MCMC(simulator: Simulator, obs=None, warmup_steps=100, num_sam
     from pyro.infer.mcmc import RandomWalkKernel
 
 
-    kernel = RandomWalkKernel(model=model)  # use a random walk kernel for MCMC inference
+    kernel = AdaptiveMetropolisHastings(model=model, target_accept_prob=0.35)  # use an adaptive Metropolis-Hastings kernel for MCMC inference
     mcmc = MCMC(kernel, num_samples=num_samples, warmup_steps=warmup_steps, num_chains=num_chains)  # set up the MCMC inference
     mcmc.run(simulator, obs=obs, **kwargs)
     return mcmc
@@ -175,6 +176,7 @@ def save_diagnostics_to_csv(mcmc, filename, with_time=True):
     diagnostics = mcmc.diagnostics()
     diagnostics_df = pd.DataFrame(diagnostics)
     diagnostics_df.to_csv(filename, index=False)
+    print(f"Diagnostics saved to {filename}")
 
 def _open_pred_samples_from_pt(filename):
     return torch.load(filename)
@@ -217,6 +219,13 @@ def get_diagnostics_from_csv(filename):
     return diagnostics_df
 
 
+def print_ESS_per_chain(samples_df, param_names):
+    for param in param_names:
+        for chain in samples_df["Chain"].unique():
+            chain_samples = samples_df[samples_df["Chain"] == chain][param]
+            ess = effective_sample_size(torch.tensor(chain_samples.astype(float).values, dtype=torch.float32).unsqueeze(0))  # add a singleton dimension to escape assertion errors.
+            print(f"ESS for {param} in Chain {chain}: {ess.item()}")
+
 # ----------------------------------------------------------
 
 
@@ -227,7 +236,7 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
     wltp_df = pd.read_csv(processed_data_dir / "MLP001_wltp_25degC_record_deq.csv")
     param_df = pd.read_csv(processed_data_dir / "MLP001_params.csv")
     ocv_df = pd.read_csv(processed_data_dir / "MLP001_ocv.csv")
-    entropy_df = pd.read_csv(processed_data_dir / "entropydata_cell1.csv")
+    entropy_df = pd.read_csv(processed_data_dir / "entropy_data_cell1.csv")
 
 
     # take only the first x records
@@ -252,7 +261,7 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 
     observed_values = torch.tensor(wltp_df["Voltage(V)"].to_numpy(), dtype=torch.float32)  # observed voltage values from the experiment
     # set up the simulator.
-    sim = Simulator(wltp_df, ocv_df, param_df, entropy_df, lp_cell, gauss_interps=gauss_interps, t_eval = wltp_df["deq_Elapsed Time[h]"].to_numpy() * 3600)
+    sim = Simulator(wltp_df, ocv_df, param_df, lp_cell, gauss_interps=gauss_interps, t_eval = wltp_df["deq_Elapsed Time[h]"].to_numpy() * 3600)
     sim.y0 = [1, 0, 0, 25]  # initial state: soc=1, v_rc1=0, v_rc2=0, T=25 deg 
     sim.kwargs["max_step"] = 1  # set the max step size for the simulation to avoid numerical issues.
     sim.kwargs["dense_output"] = False  # set the output to not be dense, to avoid running out of memory with large simulations.
@@ -266,24 +275,31 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 START_IDX = 8500
 STOP_IDX = 20000
 
+def save_run(warmup_steps: int = 5, samples: int = 5, chains: int = 2, filename_prefix: str = "pred_samples_test_mulchains"):
+    output_dir = get_path_to_data_results_dir() / filename_prefix
+    output_dir.mkdir(parents=True, exist_ok=True)
+    samples, mcmc = generate_sample_test(warmup_steps=warmup_steps, num_samples=samples, num_chains=chains)  # generate samples from the model using MCMC inference
+    save_pred_samples_to_pt(samples, get_path_to_data_results_dir() / f"{filename_prefix}"/ "samples.pt", with_time=False)  # save the samples to a .pt file
+    print(mcmc.diagnostics())
+    save_diagnostics_to_csv(mcmc, get_path_to_data_results_dir() / f"{filename_prefix}" / "diagnostics.csv", with_time=False)  # save the diagnostics to a .csv file
 
 if __name__ == "__main__":
     
      
     set_rc_params()  # set the rc params for plotting
-    # samples, mcmc = generate_sample_test(warmup_steps=5, num_samples=5, num_chains=2)  # generate samples from the model using MCMC inference
-    # print(f"MCMC diagnostics: {mcmc.diagnostics()}")  # print the diagnostics of the MCMC inference
-    # print(f"Samples: {samples}")
-    # save_pred_samples_to_pt(samples, get_path_to_data_results_dir() / "pred_samples_test_mulchains.pt", with_time=False)  # save the samples to a .pt file
-    # save_diagnostics_to_csv(mcmc, get_path_to_data_results_dir() / "diagnostics_test_mulchains.csv", with_time=False)  # save the diagnostics to a .csv file
+    filename_pref = "MC_testing/adaptMH1"
+    save_run(warmup_steps=5, samples=5, chains=2, filename_prefix=filename_pref)  # run the inference and save the samples and diagnostics
 
     # read the samples back in and convert to pandas dataframe
-    samples_df = open_pred_samples_as_df(get_path_to_data_results_dir() / "pred_samples_uniform_dists_wider_range.pt", drop_index=False)
+    samples_df = open_pred_samples_as_df(get_path_to_data_results_dir() / f"{filename_pref}/samples.pt", drop_index=False)
     # print(f"samples_df: ", samples_df.head())
     # print(f"Samples dataframe shape: {samples_df.shape}")
     # print(f"Samples dataframe columns: {samples_df.columns}")
     plot_mixing(samples_df, param_names=["obs_scale", "var_scaled"])  # plot the mixing of the R0 parameter
-    compute_diag_stats_on_samples(samples_df, verbose=True, extra_exclude_cols=("eps_R0 [Ohm]_standardised",))  # compute the diagnostics of the samples
+    diags = pd.read_csv(get_path_to_data_results_dir() / f"{filename_pref}/diagnostics.csv")
+
+    print_ESS_per_chain(samples_df, param_names=["obs_scale", "var_scaled"])  # print the effective sample size for each chain and parameter
+
 
 
     # need to change how samples are saved to and read from a df I think, now I have got parallel computation working correctly...

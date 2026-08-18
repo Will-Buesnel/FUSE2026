@@ -44,6 +44,7 @@ from tqdm import tqdm
 import time
 import pandas as pd
 import matplotlib.pyplot as plt
+import diffrax as dx
 
 class ThermalModel(BaseModel):
 
@@ -79,6 +80,8 @@ class CoupledModel(BaseModel):
         super().__init__()
         self.electrical_model = electrical_model
         self.thermal_model = thermal_model
+        self._get_sol = self._get_sol_solveivp  # default solver is solve_ivp, can be changed to diffrax if desired.
+        self.solver_method = "BDF"  # default method for solve_ivp, can be changed to "RK45" or "RK23" if desired.
 
     def partial_voc_partial_T(self, soc, T, verbose=False):
         """
@@ -133,15 +136,25 @@ class CoupledModel(BaseModel):
         thermal_state = self.thermal_model.unpack(y[elec_state_size:])
         return elec_state, thermal_state
 
-    def _get_sol_solveivp(rhs_func: Callable,
-                           y0, method: str, max_step, atol,
+    def set_sol_function(self, solver: str, method: str = "BDF"):
+        if solver == "solve_ivp":
+            self._get_sol = self._get_sol_solveivp
+        elif solver == "diffrax":
+            self._get_sol = self._get_sol_diffrax
+        else:
+            raise ValueError(f"Unknown solver: {solver}. Must be one of 'solve_ivp' or 'diffrax'.")
+        self.solver_method = method
+
+
+    def _get_sol_solveivp(self,rhs_func: Callable,
+                           y0, max_step, atol,
                             rtol, t_eval, args: tuple, t_span, **kwargs
                             ):
         
         return solve_ivp(  
                         fun=rhs_func,
                         y0=y0,
-                        method=method,
+                        method=self.solver_method,
                         max_step=max_step,
                         atol=atol,
                         rtol=rtol,
@@ -151,19 +164,22 @@ class CoupledModel(BaseModel):
                         **kwargs
         )
 
-    def _get_sol_diffrax(rhs_func: Callable,
-                           y0, method: str, max_step, atol,
-                            rtol, t_eval, args: tuple, t_span, **kwargs
+    def _get_sol_diffrax(self, rhs_func: Callable,
+                           y0, max_step=0.5, atol=1e-6,
+                            rtol=1e-3, t_eval=None, args: tuple = (), t_span=(0, 1), **kwargs
                             ):
 
         current_func, verbose, slow = args
         def rhs(t, y, args):
             return rhs_func(t, y, current_func, verbose, slow)
 
+        if self.solver_method != "Kvaerno3":
+                raise ValueError(f"Unknown method: {self.solver_method}. Only 'Kvaerno3' is supported for this model. at the moment.")
+
 
         return dx.diffeqsolve(
             dx.ODETerm(rhs),
-            dx.Kvaerno5(),
+            dx.Kvaerno3(),
             t0=t_span[0],
             t1=t_span[1],
             dt0=max_step,
@@ -198,7 +214,6 @@ class CoupledModel(BaseModel):
         # check that all required attributes are set for both models
         _check_ready(self)
 
-        
         t_span = t_eval[0], t_eval[-1] if t_eval is not None else (0, 1)
         t_max = t_span[1]
 
@@ -221,11 +236,9 @@ class CoupledModel(BaseModel):
             sol_rhs = self.rhs
 
         try:
-           
-            sol = solve_ivp(  
-                fun=sol_rhs,
+            sol = self._get_sol(  
+                rhs_func=sol_rhs,
                 y0=y0,
-                method="BDF",
                 max_step=max_step,
                 atol=atol,
                 rtol=rtol,

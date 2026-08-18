@@ -14,12 +14,11 @@ class Simulator:
     This will be what I will pass into the pyro inference engine. A wrapper of the coupled model, that allows me to easily propagate uncertainties through it.
     """
 
-    def __init__(self, cycler_df, ocv_df, param_df, entropy_df, cell: Cell, gauss_interps=None, **kwargs):
+    def __init__(self, cycler_df, ocv_df, param_df, cell: Cell, gauss_interps=None, **kwargs):
 
         self.exp_df = cycler_df
         self.ocv_df = ocv_df
         self.param_df = param_df
-        self.entropy_df = entropy_df
         self.cell = cell
         self.kwargs = kwargs
 
@@ -72,6 +71,8 @@ class Simulator:
         self.current_time = self.exp_df["Elapsed Time[h]"].to_numpy() * 3600
         self.current = -self.exp_df["Current(A)"].to_numpy()
 
+    def set_solver(self, solver: str, method: str = "Kvaerno3"):
+        self.coupled_model.set_sol_function(solver, method=method)
 
     def current_func(self, t):
         return np.interp(t, self.current_time, self.current)
@@ -113,6 +114,22 @@ class Cell:
         self.T_inf_degC = T_inf_degC # this isn't stricly a cell-related attribute, but its easy to have here and I view it as a property of the cell in the context of a given experiment.
         self.volume = volume
         self.entropy_coeff_func = entropy_coeff_func
+
+    @staticmethod
+    def get_standard_cell(entropyfunc):
+        """
+        Returns a standard mlpl001cell. can customise individual parameters if desired but this is a good starting point.
+        """
+        return Cell(
+        name="MLP001",
+        capacity_Ah=2.2,
+        c = 42.9, # J K^-1
+        h = 3.59, # J K^-1
+        c_p = 887, # J kg^-1 K^-1
+        rho = 2682, # kg m^-3,
+        entropy_coeff_func = entropyfunc
+    )
+
 
 class EntropyCoeffFunc:
     def __init__(self, entropy_df):
