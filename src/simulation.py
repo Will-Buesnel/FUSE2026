@@ -8,7 +8,12 @@ from models.coupled import CoupledModel, ThermalModel
 from models.electrical import ElectricalModel
 from models.parameters import get_all_parameter_interpolants, format_interpolants, get_parameter_function
 from models.local_stats import GibbsKernel
+from pyro.contrib.gp.kernels import Matern52
 
+
+#for debugging:
+from models.local_stats import MCMCStop
+import matplotlib.pyplot as plt
 class Simulator:
     """
     This will be what I will pass into the pyro inference engine. A wrapper of the coupled model, that allows me to easily propagate uncertainties through it.
@@ -42,17 +47,53 @@ class Simulator:
         for name, hyperparams in gauss_interps:
 
             # create a new ParameterFunction with Gaussian noise for the specified parameter
-            kernel = GibbsKernel(input_dim=2, lengthscale_fn=hyperparams['lengthscale_func'], variance=hyperparams['variance'])
+            #kernel = GibbsKernel(input_dim=2, lengthscale_fn=hyperparams['lengthscale_func'], variance=hyperparams['variance'])
+            kernel= Matern52(
+                     input_dim=2,
+                     lengthscale=torch.tensor([0.1, 5]),  # one per dimension
+                     variance=torch.tensor(hyperparams['variance'])
+                 )
 
             X = np.column_stack([self.param_df["Temperature_degC"].to_numpy(), self.param_df["SOC"].to_numpy()])
-            cov = kernel.forward(torch.tensor(X,
-                                               dtype=torch.float32)) + torch.eye(len(X)) * 1e-6  # add a small jitter for numerical stability
+            
+            K = kernel.forward(torch.tensor(X, dtype=torch.float32))
+            K_jittered = K + torch.eye(len(X), dtype=torch.float32) * 1e-5  # add a small jitter for numerical stability
+            
+            try:
+                L = torch.linalg.cholesky(K_jittered)  # Cholesky decomposition of the covariance matrix. This is allowed to have negative & positive values
+            except RuntimeError as e:
 
-            L = torch.linalg.cholesky(cov)  # Cholesky decomposition of the covariance matrix. This is allowed to have negative & positive values
-            eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df)), torch.ones(len(self.param_df))).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
+                # diagnostics in case of error:
+                asymmetry = torch.max(torch.abs(K_jittered - K_jittered.T))
+                print("asymmetry:", asymmetry.item())
+                eigvals = torch.linalg.eigvalsh(K_jittered)
+                print("eigenvalues:", eigvals)
+                print("minimum eigenvalue:", eigvals.min().item())
+                print("variance hyperparam:", hyperparams['variance'])
+
+                # produce a plot of the covariance via matrix.
+                cov_np = K_jittered.detach().cpu().numpy()
+
+                plt.imshow(cov_np, cmap="viridis")
+                plt.colorbar(label="Covariance")
+                plt.show()
+
+                eig_K = torch.linalg.eigvalsh(K)
+                eig_Kj = torch.linalg.eigvalsh(K_jittered)
+
+                print("K min:", eig_K.min())
+                print("K+jitter min:", eig_Kj.min())
+
+                print("Eigenvalue shifts:")
+                print(eig_Kj - eig_K)
+
+                raise MCMCStop
+            
+
+            eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df), dtype=torch.float32), torch.ones(len(self.param_df), dtype=torch.float32)).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
             eps_sample = L @ eps_standardised
             # debug: force eps_sample to be zero for now, to check that the model works without noise.
-            # eps_sample = torch.zeros(len(self.param_df))  # debug: force eps_sample
+            # eps_sample = torch.zeros(len(self.param_df), dtype=torch.float32)  # debug: force eps_sample
 
             pyro.deterministic(f"eps_{name}_sample", eps_sample)  # record the sampled epsilons for debugging
 
@@ -66,6 +107,9 @@ class Simulator:
             r0_values = [r0_func(soc, 25) for soc in socs]
             pyro.deterministic(f"{name}_values_at_25degC", torch.tensor(r0_values, dtype=torch.float32))  # record the parameter values at 25degC for debugging
 
+    def set_cell_capacity(self, capacity_Ah: float):
+        self.cell.capacity_Ah = capacity_Ah
+        self.elec_model.max_capacity_As = capacity_Ah * 3600  # Ah to As
 
     def set_current_func(self):
         self.current_time = self.exp_df["Elapsed Time[h]"].to_numpy() * 3600
@@ -83,7 +127,7 @@ class Simulator:
         for name, interpolant in format_interpolants(self.param_interpolants).items():
             setattr(self.elec_model, f"_{name}_interp", interpolant) 
 
-        return self.coupled_model.simulate(
+        return self.coupled_model.simulate(y0=self.y0,
             t_max=self.exp_df["Elapsed Time[h]"].to_numpy()[-1] * 3600,  # convert to seconds.
             current_func = self.current_func,
             **kwargs

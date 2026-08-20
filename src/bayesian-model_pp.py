@@ -17,18 +17,20 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 
 from models.parameters import get_all_parameter_interpolants
-from models.local_stats import AdaptiveMetropolisHastings
+from models.local_stats import AdaptiveMetropolisHastings, MCMCStop
 from utils import plot_traces, set_rc_params, get_path_to_data_results_dir, get_path_to_data_processed_dir, plot_df
 from simulation import Simulator, Cell, EntropyCoeffFunc
 import time
 
 import pyro.distributions as dist
+
 import pyro
 from pyro.infer import Predictive
 import torch
 from pyro.infer import MCMC
 from pyro.infer.mcmc.util import diagnostics as pyro_diagnostics
 from pyro.ops.stats import effective_sample_size, split_gelman_rubin
+from pyro.infer.mcmc import RandomWalkKernel
 
 VAR_INITIAL_GUESS = 1e-7  # initial guess for the observation noise
 SIM_TIMESTEPS = 30000 # take this number of timesteps for the simulation. While we're setting it up we don't need all the timesteps.
@@ -81,7 +83,7 @@ def model(simulator: Simulator, obs=None):
     gauss_interps_q = [("R0 [Ohm]", {"lengthscale_func": lengthscale_func_2d, "variance": var})]  # variational parameters for the Gaussian noise
     simulator.set_gauss_interps(gauss_interps_q)
 
-    output = simulator.run_simulation(y0=simulator.y0, **simulator.kwargs)["v_cell [V]"]  # get the voltage and resistance output from the simulation
+    output = simulator.run_simulation(**simulator.kwargs)["v_cell [V]"]  # get the voltage and resistance output from the simulation
     param_interpolants_debug.append(deepcopy(simulator.param_interpolants))  # store the parameter interpolants for debugging
     # convert output to a torch tensor
     output = torch.tensor(output, dtype=torch.float32)
@@ -94,13 +96,14 @@ def model(simulator: Simulator, obs=None):
     
 
 def run_inference_MCMC(simulator: Simulator, obs=None, warmup_steps=100, num_samples=1000, num_chains=1, **kwargs):
-    from pyro.infer import MCMC
-    from pyro.infer.mcmc import RandomWalkKernel
 
+    kernel = RandomWalkKernel(model=model, target_accept_prob=0.234)  # use an adaptive Metropolis-Hastings kernel for MCMC inference
 
-    kernel = AdaptiveMetropolisHastings(model=model, target_accept_prob=0.35)  # use an adaptive Metropolis-Hastings kernel for MCMC inference
     mcmc = MCMC(kernel, num_samples=num_samples, warmup_steps=warmup_steps, num_chains=num_chains)  # set up the MCMC inference
-    mcmc.run(simulator, obs=obs, **kwargs)
+    try:
+        mcmc.run(simulator, obs=obs, **kwargs)
+    except MCMCStop:
+        print("Inference stopped due to numerical issues.")
     return mcmc
 
 
@@ -209,10 +212,25 @@ def open_pred_samples_as_df(filename, drop_index=False):
     # tensor will be of shape (num_chains, num_samples, num_timesteps)
     return _convert_pred_samples_to_df(samples_tensor, drop_index=drop_index)
     
-def lengthscale_func_2d(x):
-        soc = x[:, 0]
-        temp = x[:, 1]  # raw temperature, e.g. 5-40
-        return 0.0025 + 0.0005 * torch.sigmoid(5000 * (soc - 0.3)) + 0.5 * temp
+
+def lengthscale_func_2d(x, soc_transition=0.3, soc_steepness=30,
+                         l_soc_low=0.02, l_soc_high=0.08,
+                         l_temp=0.15, temp_min=5.0, temp_max=40.0):
+    temp_raw = x[:, 0]
+    soc = x[:, 1]
+
+    # normalize temperature to [0, 1] so it's on a comparable scale to SOC
+    temp = (temp_raw - temp_min) / (temp_max - temp_min)
+
+    # smooth transition in SOC: steepness ~10-50 gives a soft knee,
+    # not a step. sigmoid input is O(1) in soc-units, not O(1000).
+    w = torch.sigmoid(soc_steepness * (soc - soc_transition))
+    l_soc = l_soc_low + (l_soc_high - l_soc_low) * w
+
+    # temperature contributes its own smooth, bounded term
+    l_temp_contribution = l_temp * temp
+
+    return l_soc + l_temp_contribution
 
 def get_diagnostics_from_csv(filename):
     diagnostics_df = pd.read_csv(filename)
@@ -262,7 +280,8 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
     observed_values = torch.tensor(wltp_df["Voltage(V)"].to_numpy(), dtype=torch.float32)  # observed voltage values from the experiment
     # set up the simulator.
     sim = Simulator(wltp_df, ocv_df, param_df, lp_cell, gauss_interps=gauss_interps, t_eval = wltp_df["deq_Elapsed Time[h]"].to_numpy() * 3600)
-    sim.y0 = [1, 0, 0, 25]  # initial state: soc=1, v_rc1=0, v_rc2=0, T=25 deg 
+    sim.y0 = [1, 0, 0, 26.0]  # initial state: soc=1, v_rc1=0, v_rc2=0, T=25 deg 
+    sim.set_cell_capacity(2.15) # set the cell capacity to 2.15 Ah, which is a reasonable estimate for this cell. This was found to reduce model error at steady states.
     sim.kwargs["max_step"] = 1  # set the max step size for the simulation to avoid numerical issues.
     sim.kwargs["dense_output"] = False  # set the output to not be dense, to avoid running out of memory with large simulations.
     sim.kwargs["pbar"] = False  # turn off the progress bar for the simulation, as it will be run multiple times.
@@ -272,10 +291,10 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 
     return pyro_model_sample(simulator=sim, obs=observed_values, warmup_steps=warmup_steps, num_samples=num_samples, num_chains=num_chains)
     
-START_IDX = 8500
-STOP_IDX = 20000
+START_IDX = 320000
+STOP_IDX = 360000
 
-def save_run(warmup_steps: int = 5, samples: int = 5, chains: int = 2, filename_prefix: str = "pred_samples_test_mulchains"):
+def save_run(warmup_steps: int = 200, samples: int = 200, chains: int = 2, filename_prefix: str = "pred_samples_test_mulchains"):
     output_dir = get_path_to_data_results_dir() / filename_prefix
     output_dir.mkdir(parents=True, exist_ok=True)
     samples, mcmc = generate_sample_test(warmup_steps=warmup_steps, num_samples=samples, num_chains=chains)  # generate samples from the model using MCMC inference
@@ -287,14 +306,12 @@ if __name__ == "__main__":
     
      
     set_rc_params()  # set the rc params for plotting
-    filename_pref = "MC_testing/adaptMH1"
-    save_run(warmup_steps=5, samples=5, chains=2, filename_prefix=filename_pref)  # run the inference and save the samples and diagnostics
+    filename_pref = "MC_testing/MH_Matern52_point1_5degLS_20000"  # prefix for the output files
+    save_run(warmup_steps=10000, samples=10000, chains=1, filename_prefix=filename_pref)  # run the inference and save the samples and diagnostics
 
     # read the samples back in and convert to pandas dataframe
     samples_df = open_pred_samples_as_df(get_path_to_data_results_dir() / f"{filename_pref}/samples.pt", drop_index=False)
-    # print(f"samples_df: ", samples_df.head())
-    # print(f"Samples dataframe shape: {samples_df.shape}")
-    # print(f"Samples dataframe columns: {samples_df.columns}")
+
     plot_mixing(samples_df, param_names=["obs_scale", "var_scaled"])  # plot the mixing of the R0 parameter
     diags = pd.read_csv(get_path_to_data_results_dir() / f"{filename_pref}/diagnostics.csv")
 

@@ -11,19 +11,23 @@ from models.parameters import get_initial_soc
 
 from simulation import *
 
-
-
-def run_sim(start_idx, stop_idx):
+def initialise_simulator(exp_df: pd.DataFrame, ocv_df: pd.DataFrame):
     # load in parameter datasets.
     processed_data_dir = get_path_to_data_dir() / "processed"
     param_df = pd.read_csv(processed_data_dir / "MLP001_params.csv")
-    ocv_df = pd.read_csv(processed_data_dir / "MLP001_ocv.csv")
     entropy_df = pd.read_csv(processed_data_dir / "entropy_data_cell1.csv")
-    exp_df = pd.read_csv(processed_data_dir / "MLP001_wltp_25degC_record_deq.csv").iloc[start_idx:stop_idx]  # slice the dataframe to the desired range
 
     cell = Cell.get_standard_cell(entropyfunc=EntropyCoeffFunc(entropy_df))
 
-    sim = Simulator(cycler_df=exp_df, param_df=param_df, ocv_df=ocv_df, cell=cell)
+    return Simulator(cycler_df=exp_df, param_df=param_df, ocv_df=ocv_df, cell=cell)
+
+
+def run_sim(start_idx, stop_idx):
+    exp_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_deq.csv").iloc[start_idx:stop_idx]
+    ocv_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_ocv.csv")
+    
+    sim = initialise_simulator(exp_df, ocv_df)
+
     initial_temp = 25.0  # assume the cell starts at ambient temperature
     initial_soc = get_initial_soc(initial_temp=initial_temp, initial_v_cell=exp_df["Voltage(V)"].iloc[0], ocv_df=ocv_df)
     print(f"Initial SOC: {initial_soc:.4f}")

@@ -133,6 +133,14 @@ def get_path_to_data_dir() -> Path:
     data_dir = current_file_path.parents[1] / "data"
     return data_dir
 
+def get_path_to_figures_dir() -> Path:
+    """
+    Get the path to the figures directory, which is assumed to be two levels up from this file.
+    """
+    current_file_path = Path(__file__).resolve()
+    figures_dir = current_file_path.parents[1] / "figures"
+    return figures_dir
+
 #  -----------------------------------------------------------------------------------
 
 

@@ -113,6 +113,7 @@ class ElectricalModel(BaseModel):
         soc, v_rc1, v_rc2 = sol.y
         r0, r1, r2, c1, c2 = self.get_inter_params(soc, T, verbose)  # these are the final values at the end of the simulation, but we could also return them as arrays if needed.
         current = current_func(sol.t)
+        
         # v_cell does not appear in the state vectors therefore it can be calculated in a vectorised way after the simulation
         v_cell = self._v_cell(soc, T, current, r0, v_rc1, v_rc2)
 

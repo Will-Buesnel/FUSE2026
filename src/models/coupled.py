@@ -214,15 +214,14 @@ class CoupledModel(BaseModel):
         # check that all required attributes are set for both models
         _check_ready(self)
 
+        
+
         t_span = t_eval[0], t_eval[-1] if t_eval is not None else (0, 1)
         t_max = t_span[1]
 
         if verbose:
-            print("Starting simulation with parameters:")
-            print(f"  t_max: {t_max}")
-            print(f"  max_step: {max_step}")
-            print(f"  atol: {atol}")
-            print(f"  rtol: {rtol}")
+            print(f"Starting simulation with y0={y0}, t_max={t_max}, max_step={max_step}, atol={atol}, rtol={rtol}, t_eval={t_eval}, pbar={pbar}, verbose={verbose}, slow={slow}")
+            print("cell capacity: ", self.electrical_model.max_capacity_As / 3600, "Ah")
         
         if pbar is True:
             progbar = tqdm(total=t_max, unit="s", desc="Simulating")
