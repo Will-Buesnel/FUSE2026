@@ -7,16 +7,20 @@ This is to keep the style of plots etc inkeeping with his,
 and is permissable under the GPU Licence that both repos have.
 """
 
+import time
+
 import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import torch
 from typing import List, Tuple
 import csv
 from pathlib import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 from matplotlib.widgets import Slider
 from collections.abc import Sequence
+
 
 def set_rc_params():
     """
@@ -143,6 +147,133 @@ def get_path_to_figures_dir() -> Path:
 
 #  -----------------------------------------------------------------------------------
 
+# Utils for pyro model:
+
+
+def plot_mixing(samples: pd.DataFrame, param_names):
+
+    num_params = len(param_names)  
+    num_chains = samples["Chain"].nunique()
+
+    fig, axs = plt.subplots(num_params, 1)
+
+    for i, param in enumerate(param_names): 
+        print(f"Plotting trace for {param}...")
+        for chain in range(1, num_chains+1):
+            chain_samples = samples[samples["Chain"] == chain][param]
+            axs[i].plot(chain_samples.values, label=f"Chain {chain}", alpha=0.5)
+        axs[i].set_title(f"Trace plot for {param}")
+        axs[i].set_xlabel("Iteration")
+        axs[i].set_ylabel(param)
+        axs[i].legend()
+
+    plt.tight_layout()
+
+    plt.show()
+        
+
+def save_pred_samples_to_pt(samples, filename, with_time=True):
+    # pred_samples is a dict of tensors, convert to pandas dataframe and save to csv
+    if with_time:
+        filename = filename.replace(".pt", f"_{time.strftime('%Y%m%d_%H%M%S')}.pt")
+    torch.save(samples, filename)
+
+def save_diagnostics_to_csv(mcmc, filename, with_time=True):
+    if with_time:
+        filename = filename.replace(".csv", f"_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    diagnostics = mcmc.diagnostics()
+    diagnostics_df = pd.DataFrame(diagnostics)
+    diagnostics_df.to_csv(filename, index=False)
+    print(f"Diagnostics saved to {filename}")
+
+def open_pred_samples_from_pt(filename):
+    return torch.load(filename)
+
+def convert_pred_samples_to_df(samples, drop_index=False):
+    # chains are indicated in the individual terms within the samples.
+    # i.e.: variance : [[samples from chain 1],...,[samples from chain n]]
+    # it is a list of dicts
+    # convert to pandas dataframe with columns for each parameter and rows for each sample, with a column for the chain number & iteration within a chain.
+    key1 = list(samples.keys())[0]  # get the first key to determine the shape of the samples
+    vals1 = samples[key1]  # get the values for the first key
+    n_chains, n_samples = vals1.shape[0], vals1.shape[1]  # get the number of chains and samples
+    all_samples = []
+    for chain in range(1, n_chains + 1):
+        for sample in range(1, n_samples + 1):
+            sample_dict = {param: samples[param][chain-1, sample-1].detach().numpy() for param in samples.keys()}
+            sample_dict["Chain"] = chain
+            sample_dict["Iteration"] = sample
+            all_samples.append(sample_dict)
+
+    samples_df = pd.DataFrame(all_samples)
+    if drop_index:
+        samples_df = samples_df.drop(columns=["Iteration"])
+    return samples_df
+
+
+def open_pred_samples_as_df(filename, drop_index=False):
+    samples_tensor = open_pred_samples_from_pt(filename)
+    # convert to pandas dataframe
+    # tensor will be of shape (num_chains, num_samples, num_timesteps)
+    return convert_pred_samples_to_df(samples_tensor, drop_index=drop_index)
+
+
+
+def df_to_tensor_dict(df, param_cols=None, dtype=torch.float32):
+    if param_cols is None:
+        param_cols = [c for c in df.columns if c not in ('Iteration', 'Chain')]
+    
+    chains = sorted(df['Chain'].unique())
+    iters = sorted(df['Iteration'].unique())
+    n_chains = len(chains)
+    n_iters = len(iters)
+    
+    chain_idx = {c: i for i, c in enumerate(chains)}
+    iter_idx = {it: i for i, it in enumerate(iters)}
+    
+    result = {}
+    for param in param_cols:
+        sample_len = np.atleast_1d(df[param].iloc[0]).shape[0]
+        arr = np.empty((n_chains, n_iters, sample_len), dtype=np.float64)
+        
+        for chain, iteration, sample in zip(df['Chain'], df['Iteration'], df[param]):
+            arr[chain_idx[chain], iter_idx[iteration], :] = sample
+        
+        result[param] = torch.tensor(arr, dtype=dtype)
+    
+    return result
+
+
+
+def graph_model_outputs(sim, gauss_interps: list[tuple[str, object]] = None, y0: list = [1,0,0,25], obs=None):
+        
+        res1 = sim.run_simulation(**sim.kwargs, pbar=True, max_step = 40)  # run the simulation once to check it works.
+        # reset the gauss interps
+        sim.set_gauss_interps(gauss_interps)
+        res2 = sim.run_simulation(**sim.kwargs, pbar=True, max_step = 40)  # run the simulation a second time to check it works.
+    
+        plt.plot(res1["t [s]"], res1["v_oc [V]"], label="Run 1", alpha=0.5)
+        plt.plot(res2["t [s]"], res2["v_oc [V]"], label="Run 2", alpha=0.5)
+    
+        plt.xlabel("Time [s]")
+        plt.ylabel("Voltage [V]")
+        plt.title("Voltage vs Time for MLP001 Cell")
+        plt.legend()
+        plt.show()
+       
+        plt.figure()
+        plt.plot(res1["t [s]"], res1["R0 [Ohm]"], label="Run 1", alpha=0.5)
+        plt.plot(res2["t [s]"], res2["R0 [Ohm]"], label="Run 2", alpha=0.5)
+        plt.xlabel("Time [s]")
+        plt.ylabel("R0 [Ohm]")
+        plt.title("R0 vs Time for MLP001 Cell")
+        plt.legend()
+        plt.show()
+    
+
+
+# ------------------------------------------------------------------------------------------
+
 
 def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value'):
         """
@@ -211,6 +342,7 @@ def get_errors_by_resampling(model_ts, experiment_times, experiment_voltages, mo
     errors = model_voltages - resampled_exp_voltages
     return errors
 
+import torch
 from tqdm import tqdm
 
 def dequantise_data(time: np.ndarray, pbar: bool = False) -> Tuple[np.ndarray, np.ndarray]:
@@ -272,6 +404,14 @@ def convert_datetime_to_hours(df: pd.DataFrame, time_col: str = "Total Time") ->
     hours = hours - hours[0]
     return hours
 
+def safe_cholesky(K, jitter=1e-6, max_tries=6):
+    K = (K + K.T) / 2
+    for i in range(max_tries):
+        try:
+            return torch.linalg.cholesky(K + torch.eye(len(K), dtype=K.dtype, device=K.device) * jitter)
+        except RuntimeError:
+            jitter *= 10
+    raise RuntimeError(f"Cholesky failed even with jitter={jitter:g}")
 
 def plot_matrix(
     ax: plt.Axes,
@@ -528,7 +668,7 @@ def subjectively_better_subplots(
     **kwargs,
 ):
     # Source - https://stackoverflow.com/questions/44970010/axes-class-set-explicitly-size-width-height-of-axes-in-given-units
-    # Retrieved 2025-12-08, License - CC BY-SA 4.0
+    # Retrieved 2025-12-08, License - CC BY- 4.0
     lm = l_margin / 2.54
     rm = r_margin / 2.54
     ax_padding = vertical_padding / 2.54

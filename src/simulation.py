@@ -12,7 +12,8 @@ from pyro.contrib.gp.kernels import Matern52
 
 
 #for debugging:
-from models.local_stats import MCMCStop
+from models.local_stats import MCMCStop, InvalidProposal
+from utils import safe_cholesky
 import matplotlib.pyplot as plt
 class Simulator:
     """
@@ -47,20 +48,17 @@ class Simulator:
         for name, hyperparams in gauss_interps:
 
             # create a new ParameterFunction with Gaussian noise for the specified parameter
-            #kernel = GibbsKernel(input_dim=2, lengthscale_fn=hyperparams['lengthscale_func'], variance=hyperparams['variance'])
-            kernel= Matern52(
-                     input_dim=2,
-                     lengthscale=torch.tensor([0.1, 5]),  # one per dimension
-                     variance=torch.tensor(hyperparams['variance'])
-                 )
+            kernel = GibbsKernel(input_dim=2, lengthscale_fn=hyperparams['lengthscale_func'], variance=hyperparams['variance'])
 
             X = np.column_stack([self.param_df["Temperature_degC"].to_numpy(), self.param_df["SOC"].to_numpy()])
             
-            K = kernel.forward(torch.tensor(X, dtype=torch.float32))
-            K_jittered = K + torch.eye(len(X), dtype=torch.float32) * 1e-5  # add a small jitter for numerical stability
+            K = kernel.forward(torch.tensor(X, dtype=torch.float64))
+            K_jittered = K + torch.eye(len(X), dtype=torch.float64) * 1e-6 * hyperparams['variance']   # make the jitter adapt to the variance of the model.
+      
+        
             
             try:
-                L = torch.linalg.cholesky(K_jittered)  # Cholesky decomposition of the covariance matrix. This is allowed to have negative & positive values
+                L = safe_cholesky(K_jittered)  # Cholesky decomposition of the covariance matrix. This is allowed to have negative & positive values
             except RuntimeError as e:
 
                 # diagnostics in case of error:
@@ -87,16 +85,19 @@ class Simulator:
                 print("Eigenvalue shifts:")
                 print(eig_Kj - eig_K)
 
-                raise MCMCStop
-            
+                print(f"{hyperparams['variance']=}, {hyperparams['lengthscale_func']=}")
 
-            eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df), dtype=torch.float32), torch.ones(len(self.param_df), dtype=torch.float32)).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
+                raise InvalidProposal(f"Cholesky decomposition failed for parameter {name}. Check the covariance matrix and hyperparameters.") from e
+            
+            #print("sampling eps_standardised from a gaussian process with mean0 and variance: 1", )
+            eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df), dtype=L.dtype), torch.ones(len(self.param_df), dtype=L.dtype)).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
+     
             eps_sample = L @ eps_standardised
             # debug: force eps_sample to be zero for now, to check that the model works without noise.
             # eps_sample = torch.zeros(len(self.param_df), dtype=torch.float32)  # debug: force eps_sample
-
+            #print(f"{L=}")
             pyro.deterministic(f"eps_{name}_sample", eps_sample)  # record the sampled epsilons for debugging
-
+            #print(f"{eps_sample=}")
             self.param_interpolants[name] = get_parameter_function(self.param_df, name, eps_sample.detach().numpy())  # detach to avoid backprop through the sampling process
                                                                                                                     # maybe it is better to take a copy for this?
 
@@ -122,6 +123,7 @@ class Simulator:
         return np.interp(t, self.current_time, self.current)
 
     def run_simulation(self, **kwargs) -> dict:
+
         
         # set the interpolants as funcs for the model
         for name, interpolant in format_interpolants(self.param_interpolants).items():

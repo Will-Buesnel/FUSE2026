@@ -168,15 +168,14 @@ class ElectricalModel(BaseModel):
         # vectorised: soc, T can be scalars or arrays
         # if verbose:
         #     print(f"Getting parameters for soc={soc}, T={T} deg C")
+
         r0 = self._r0_interp(soc, T)
         r1 = self._r1_interp(soc, T)
         r2 = self._r2_interp(soc, T)
         t1 = self._tau1_interp(soc, T)
         t2 = self._tau2_interp(soc, T)
-        c1 = t1 / r1
-        c2 = t2 / r2
-        # if verbose:
-        #     print(f"r0={r0}, r1={r1}, r2={r2}, t1={t1}, t2={t2}")
+
+ 
         return r0, r1, r2, t1, t2
 
     def _soc_ode(self, current):

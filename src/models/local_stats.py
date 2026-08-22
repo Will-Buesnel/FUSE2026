@@ -1,13 +1,23 @@
 """
-I'm negl this is straight AI code.
+Initially this was written with the help of Claude while I got to grips with Pyro.
+
+As I got further into the proejct I realised the implementations of these things were not correct in some cases, and unclear in almost all.
+
+So I have rewritten parts where necesary. A 6 week project would not allow for a full rewrite;
+
+A big help on this rewrite for the Adaptive Metropolis-Hastings was this medium article: https://medium.com/@soham.phanse/the-algorithms-that-unlock-bayesian-inference-part-2-adaptive-metropolis-hastings-9ef8322c0b8b
 """
 
+from pathlib import Path
+
+from functorch import dim
 import torch
 import pyro
 import pyro.distributions as dist
 import pyro.contrib.gp as gp
 from scipy.interpolate import UnivariateSpline
 from pyro.infer.mcmc.mcmc_kernel import MCMCKernel
+from pyro.infer.autoguide.initialization import init_to_median
 
 import matplotlib.pyplot as plt # here for debugging matricies; ignore elsewise
 
@@ -24,11 +34,13 @@ class GibbsKernel(gp.kernels.Kernel):
         if variance is None:
             variance = torch.tensor(1.0)
         variance = torch.as_tensor(variance, dtype=torch.get_default_dtype())
+        if variance <= 0:
+            raise ValueError("variance must be positive")
         self.variance = pyro.nn.PyroParam(variance, dist.constraints.positive)
 
         self.lengthscale_fn = lengthscale_fn
 
-    def _ell(self, X):
+    def _ell(self, X): # legacy 1d version of _ell_nd, returns (N, 1) where N is the number of input points.
         ell = self.lengthscale_fn(X)
         ell = ell.reshape(X.size(0), -1)
         if ell.shape[1] != 1:
@@ -39,29 +51,52 @@ class GibbsKernel(gp.kernels.Kernel):
         if torch.any(ell <= 0):
             raise ValueError("lengthscale_fn produced non-positive lengthscale(s)")
         return ell
+    
+
+    def _ell_nd(self, X):
+        # n-dimensional version of _ell, returns (N, d) where d is the input dimension.
+        ell = self.lengthscale_fn(X) # this should ideally return a tensor of shape (N, d) where d is the input dimension.
+        if (ell.shape != (X.shape[0], self.input_dim)):
+            raise ValueError(
+                f"lengthscale_fn must return one lengthscale per input dimension; "
+                f"got shape {tuple(ell.shape)} for input shape {tuple(X.shape)}"
+            )
+        ell = ell.reshape(X.size(0), -1)
+        if torch.any(ell <= 0):
+            raise ValueError("lengthscale_fn produced non-positive lengthscale(s)")
+        return ell
+    
 
     def forward(self, X, Z=None, diag=False):
+        # X and Z are two sets of points we are computing covariances between. 
+        # for our purposes we will only really use X. I have left the Z option as it is standard practice and might be used down the line.
         X = self._slice_input(X)
         if Z is None:
             Z = X
         else:
             Z = self._slice_input(Z)
 
-        ell_X = self._ell(X)                       # (N, 1)
-        ell_Z = self._ell(Z)                        # (M, 1)
+        ell_X = self._ell_nd(X)                       # (N, d)
+        ell_Z = self._ell_nd(Z)                        # (M, d)
 
-        ell2_sum = ell_X**2 + ell_Z.t()**2           # (N, M)
-        ell_prod = 2 * (ell_X @ ell_Z.t())           # (N, M)
-        prefactor = torch.sqrt(ell_prod / ell2_sum)
+        d = X.shape[1]  # input dimension
+        K = torch.ones(X.shape[0], Z.shape[0], dtype=X.dtype, device=X.device)  # initialize K with ones
 
-        X2 = X.pow(2).sum(dim=1, keepdim=True)
-        Z2 = Z.pow(2).sum(dim=1, keepdim=True)
-        dist2 = X2 - 2 * X @ Z.t() + Z2.t()
-        dist2 = dist2.clamp(min=0.0)                 # guard against fp noise
+        for dim in range(d):
+            ell_Xk = ell_X[:, dim:dim+1]  # (N, 1)
+            ell_Zk = ell_Z[:, dim:dim+1]  # (M, 1)
+            ell2_sum_k = ell_Xk**2 + ell_Zk.t()**2  # (N, M)
+            ell_prod_k = 2 * (ell_Xk @ ell_Zk.t())
+            prefactor_k = (ell_prod_k / ell2_sum_k).pow(1 / 2)  # (N, M)
 
-        exponent = -dist2 / ell2_sum
-        K = self.variance * prefactor * torch.exp(exponent)
+            diff_k = X[:, dim:dim+1] - Z[:, dim:dim+1].t()  # (N, M) : difference between each pair of points in dimension k.
+            dist2_k = diff_k**2  # (N, M)
+            dist2_k = dist2_k.clamp(min=0.0)  # guard against fp noise
 
+
+            K *= prefactor_k * torch.exp(-dist2_k / ( ell2_sum_k))  # again use the 1d equivalent.
+
+        K *= self.variance  # scale by variance
         if diag:
             return K.diag()
         return K
@@ -107,19 +142,21 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         adapt_start: int = 100,
         epsilon: float = 1e-6,
         sd_scale: float = None,
+        c0: torch.tensor | None = None, # it infers the dtype for any samples from this. Potentially this is not an optimal method, but it works.
     ):
         self.model = model
         self.init_step_size = init_step_size
         self.target_accept_prob = target_accept_prob
-        self.adapt_start = adapt_start # ideally is a value > dim^(3/2). theres nowhere to reference this, this is just intuition on my part that might be wrong.
+        self.adapt_start = adapt_start # t0 in the haario et al paper. This is the number of steps before we start adapting the covariance matrix.
         self.epsilon = epsilon
         self.sd_scale = sd_scale  # set to 2.4**2 / dim once dim is known, if None
-
+        self.c0 = c0
         self._t = 0
         self._log_step_size = math.log(init_step_size)
         self._accept_cnt = 0
         self._mean_accept_prob = 0.0
         super().__init__()
+        
 
     def setup(self, warmup_steps, *args, **kwargs):
         self._warmup_steps = warmup_steps
@@ -132,6 +169,7 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             self.model,
             model_args=args,
             model_kwargs=kwargs,
+            init_strategy=init_to_median(num_samples=15)
         )
         self._energy_last = self.potential_fn(self._initial_params)
 
@@ -140,7 +178,16 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         self._site_shapes = {k: v.shape for k, v in self._initial_params.items()}
         self._site_numels = {k: v.numel() for k, v in self._initial_params.items()}
         self._dim = sum(self._site_numels.values())
+        print(f"AdaptiveMetropolisHastings: total dimension = {self._dim}, site names = {self._site_names}")
+        if self.c0 is not None:
+            self._cov = self.c0
+            if self.c0.shape != (self._dim, self._dim):
+                raise ValueError(f"c0 must be of shape ({self._dim}, {self._dim}), but got {self.c0.shape}")
+        else:
+            self.c0 = torch.eye(self._dim, dtype=torch.float32) * self.init_step_size**2  # initial covariance matrix, isotropic. default dtype is float32 for samples due to this.
 
+        self.emp_cov = self.c0.clone()  # empirical covariance matrix, initialized to c0
+        self._mean = self._flatten(self._initial_params).clone()  # running mean of the samples, initialized to initial params
         self._site_slices = {}
 
         self._site_slices = {}
@@ -154,18 +201,13 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             self._site_slices[name] = slice(idx, idx + n)
             idx += n
 
-
-
         if self.sd_scale is None:
             self.sd_scale = 2.4**2 / self._dim # 2.4 is taken from Gelman, wilks et al (even though we dont have access to this paper).
+            # technically speaking it is actually 2.38.
 
-        # running mean/covariance (Welford-style update), in unconstrained flat space
-        if self._t <= self._warmup_steps: # going to try only updating during warmup, since that is where the AM really improves over standard. 
-            # otherwise, I would suppose it runs the risk of some type of 'forgetting' of the covariance structure.
-            # update mean/covariance
-            self._mean = self._flatten(self._initial_params).clone()
-            self._cov = torch.eye(self._dim, dtype=self._mean.dtype) * (self.init_step_size**2)
+        self._scatter = torch.zeros(self._dim, self._dim, dtype=self.c0.dtype)
 
+        
     def _flatten(self, params):
         return torch.cat([params[k].reshape(-1) for k in self._site_names])
 
@@ -178,89 +220,133 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             idx += n
         return out
 
-    def sample(self, params):
+    def _update_empir_cov(self, proposal):
+
+        print("Calculating empirical covariance matrix at step", self._t)
+    
+        X_t = proposal
+        X_t_1bar = self._mean 
+        t = self._t
+        self._mean = self._mean + (X_t - self._mean) / t
+        X_tbar = self._mean
+        
+        # going to use outer products to account for possible shape issues in proposal.    
+        self.emp_cov = (t-1)/t * self.emp_cov + self.sd_scale/t * (t*torch.outer(X_t_1bar, X_t_1bar) - (t+1) * torch.outer(X_tbar, X_tbar)
+        + torch.outer(X_t, X_t))
+        + self.epsilon * torch.eye(self._dim, dtype=self.c0.dtype)  # add ridge term for numerical stability
+        cond_number = torch.linalg.cond(self.emp_cov)
+        if cond_number > 1e10:
+            print(f"Warning: covariance matrix is ill-conditioned at step {self._t}. Condition number = {cond_number:.2e}")
+
+
+    def _Welford_update_empir_cov(self, proposal):
+        X_t = proposal
+        t = self._t
+
+        mean_prev = self._mean.clone()
+        self._mean = self._mean + (X_t - self._mean) / t
+
+        delta_prev = X_t - mean_prev      # X_t - mean_{t-1}
+        delta_curr = X_t - self._mean     # X_t - mean_t
+
+        # running scatter matrix update (Welford, multivariate). This is the runnning sum of variances..
+        self._scatter = self._scatter + torch.outer(delta_prev, delta_curr)
+
+        if t > 1:
+            cov = self.sd_scale * self._scatter / (t - 1)
+            cov = cov + self.epsilon * torch.eye(self._dim, dtype=self.c0.dtype)
+            # force symmmetry to avoid numerical issues.
+            self.emp_cov = 0.5 * (cov + cov.T)
+
+        cond_number = torch.linalg.cond(self.emp_cov)
+        if cond_number > 1e10:
+            print(f"Warning: ill-conditioned at step {self._t}. cond = {cond_number:.2e}")
+    
+
+    def sample(self, params): 
+        # turn params dtype to desired:
+        params = {k: v.to(self.c0.dtype) for k, v in params.items()}
         flat_params = self._flatten(params)
+        # debugging:
 
-        if self._t in [self.adapt_start-395, self.adapt_start, self.adapt_start+1, self.adapt_start + 100, self.adapt_start + 1000]:
-            print(
-                self._t,
-                "acc =", self._mean_accept_prob,
-                "cov eig:",
-                torch.linalg.eigvalsh(self._cov).min().item(),
-                torch.linalg.eigvalsh(self._cov).median().item(),
-                torch.linalg.eigvalsh(self._cov).max().item(),
+        # print(f"Step {self._t}: current params = {flat_params}")
+        # print(f"Step {self._t}: current energy = {self._energy_last}")
+        # print(f"Step {self._t}: current empirical covariance matrix = {self.emp_cov}")
 
-            )
-            print(
-                "diag std:",
-                torch.sqrt(torch.diag(self._cov)).min().item(),
-                torch.sqrt(torch.diag(self._cov)).median().item(),
-                torch.sqrt(torch.diag(self._cov)).max().item(),
-            )
-
-        if self._t < self.adapt_start:
-            # isotropic phase, same scalar-adaptation as RandomWalkKernel
-            step_size = math.exp(self._log_step_size)
-            proposal = flat_params + step_size * torch.randn_like(flat_params)
-        else:
-            # full-covariance phase: propose from N(current, sd_scale * cov + eps*I)
-            cov = self.sd_scale * self._cov + self.epsilon * torch.eye(self._dim, dtype=self._cov.dtype)
-            try:
-                L = torch.linalg.cholesky(cov)
-            except torch._C._LinAlgError:
-                print("Stopping: Covariance matrix is not positive definite. Cholesky decomposition failed.")
-                eig_min = torch.linalg.eigvalsh(cov).min()
-                print("Minimum eigenvalue:", eig_min.item())
-                print("Maximum eigenvalue:", torch.linalg.eigvalsh(cov).max().item())                
-                plt.imshow(cov.detach().numpy())
-                plt.colorbar()
-                plt.title("Covariance Matrix")
-                plt.show()
-                # if the minimum eigenvalue is negative, it indicates that the covariance matrix is not positive definite.
-                # if it is really small and negative, it is likely due to numerical issues.
-                # if it is large negative, something in the update rule is not working properly.
-                # if it is massive and negative (i.e. np.inf), then the covariance matrix is likely diverging and the MCMC is not working properly..
-
-                raise MCMCStop
+        if self._t <= self.adapt_start:
             
-                
-            proposal = flat_params + L @ torch.randn(self._dim, dtype=flat_params.dtype)
+            proposal = flat_params + torch.distributions.MultivariateNormal(loc=torch.zeros(self._dim, dtype=self.c0.dtype), covariance_matrix=self.c0).sample()
+            use_cov = self.c0
 
-        new_params = self._unflatten(proposal)
-        energy_proposal = self.potential_fn(new_params)
-        delta_energy = energy_proposal - self._energy_last
-        accept_prob = (-delta_energy).exp().clamp(max=1.0).item()
-
-        rand = pyro.sample("rand_t={}".format(self._t), dist.Uniform(0.0, 1.0))
-        accepted = False
-        if rand < accept_prob:
-            accepted = True
-            params = new_params
-            self._energy_last = energy_proposal
-            flat_params = proposal  # for the running-covariance update below
-
-        # scalar step-size adaptation (only matters during isotropic phase)
-        if self._t <= self._warmup_steps:
-            adaptation_speed = max(0.001, 0.1 / math.sqrt(1 + self._t))
-            self._log_step_size += adaptation_speed * (accept_prob - self.target_accept_prob)
-
-        # online mean/covariance update (Welford), using post-step position
-        self._t += 1
-        n = self._t
-        delta = flat_params - self._mean
-        self._mean += delta / n
-        delta2 = flat_params - self._mean
-        self._cov += (torch.outer(delta, delta2) - self._cov) / n
-
-        if self._t > self._warmup_steps:
-            n_post = self._t - self._warmup_steps
-            if accepted:
-                self._accept_cnt += 1
         else:
-            n_post = self._t
-        self._mean_accept_prob += (accept_prob - self._mean_accept_prob) / n_post
+            # use empirical covariance proposal
+            try:
+                torch.linalg.cholesky(self.emp_cov)
+            except RuntimeError as e:
+                # print the error message and the empirical covariance matrix for debugging
+                print(f"Cholesky decomposition failed at step {self._t}. Empirical covariance matrix:\n{self.emp_cov}")
+                # print the eigenvalues for debugging
+                eigvals = torch.linalg.eigvalsh(self.emp_cov)
+                print(f"Eigenvalues of empirical covariance matrix:\n{eigvals}")
+                raise e
+            proposal = flat_params + torch.distributions.MultivariateNormal(loc=torch.zeros(self._dim, dtype=self.c0.dtype), covariance_matrix=self.emp_cov).sample()
+            use_cov = self.emp_cov
+
+        
+        proposal_params = self._unflatten(proposal)
+        energy_proposal = self.potential_fn(proposal_params) # energy proposal approximates the target density fn given in the paper by pi.
+        prev_energy = self._energy_last
+
+        target_ratio = energy_proposal - prev_energy # I think you minus because these are log probs?
+        # compute proposal density ratio. This is the ratio of the proposal density at the current point to the proposal density at the proposed point.
+        # proposal_next_given_current = torch.distributions.MultivariateNormal(loc=flat_params, covariance_matrix=use_cov).log_prob(proposal)
+        # proposal_current_given_next = torch.distributions.MultivariateNormal(loc=proposal, covariance_matrix=use_cov).log_prob(flat_params)
+        # proposal_ratio = torch.exp(proposal_current_given_next - proposal_next_given_current)
+        proposal_ratio = 1.0 # since the proposal is symmetric, the ratio is 1.0
+        # compute acceptance probability alpha
+
+        alpha = min(1.0, torch.exp(-target_ratio) * proposal_ratio)
+        self._last_alpha = alpha
+
+
+        # accept if alpha is greater than a uniformly distributed randomly sampled number
+        accepted_state_flag = False
+        params_before = flat_params.clone() # store the current params before we update them.
+
+        if torch.rand(1).item() < alpha:
+            self._accept_cnt += 1
+            self._energy_last = energy_proposal
+            
+            flat_params = proposal
+            params = proposal_params
+            accepted_state_flag = True
+
+        self._t += 1  # increment the step counter
+
+        if self._t > 1:
+                                self._Welford_update_empir_cov(proposal if accepted_state_flag else params_before) # update the empirical covariance matrix with the new sample.
+
+         # update the mean acceptance probability
+        self._mean_accept_prob = (self._mean_accept_prob * (self._t -1)+ alpha) / (self._t)
+
+        # print the min median and max eigenvalues of the empirical covariance matrix for debugging
+        if self._t % 50 == 0:
+            eigvals = torch.linalg.eigvalsh(self.emp_cov)
+            print(f"Step {self._t}: empirical covariance matrix eigenvalues: min={eigvals.min().item():.3e}, median={eigvals.median().item():.3e}, max={eigvals.max().item():.3e}")
+            eigvals, eigvecs = torch.linalg.eigh(self.emp_cov)
+            stiff_direction = eigvecs[:, 0]  # eigh returns ascending order, so index 0 = min eigenvalue
+            print(f"Stiff direction: {stiff_direction}")
+       
+            
+        # # debugging print statements
+        # print(f"Step {self._t}: acceptance probability = {alpha:.4f}")
+        # print(f"{proposal_ratio=}")
+        # print(f"t={self._t}, target_ratio={target_ratio.item():.3f}, ||proposal-flat_params||={torch.norm(proposal-flat_params).item():.4f}")
+        # tiny_proposal = flat_params + 1e-6 * torch.randn_like(flat_params)
+        # print(self.potential_fn(self._unflatten(tiny_proposal)) - self._energy_last)
 
         return params.copy()
+    
 
     @property
     def initial_params(self):
@@ -286,145 +372,99 @@ class AdaptiveMetropolisHastings(MCMCKernel):
 class MCMCStop(Exception):
     pass
 
+class InvalidProposal(Exception):
+    pass
+
+def lengthscale_func_2d(x, soc_transition=0.3, soc_steepness=30,
+                         l_soc_low=0.02, l_soc_high=0.08,
+                         l_temp=0.15, temp_min=5.0, temp_max=40.0, l_temp_min=0.05, l_temp_max=0.2):
+    temp_raw = x[:, 0]
+    soc = x[:, 1]
+
+    # normalize temperature to [0, 1] so it's on a comparable scale to SOC
+    temp = (temp_raw - temp_min) / (temp_max - temp_min)
+
+    # smooth transition in SOC: steepness ~10-50 gives a soft knee,
+    # not a step. sigmoid input is O(1) in soc-units, not O(1000).
+    w = torch.sigmoid(soc_steepness * (soc - soc_transition))
+    l_soc = l_soc_low + (l_soc_high - l_soc_low) * w
+
+    return torch.stack([5 * torch.ones_like(temp), l_soc], dim=1)  # shape (N, 2). for now I will keep temp lengthscale constant.
 
 
-@staticmethod
-def generate_length_scale_function(x: torch.Tensor, y: torch.Tensor, ell_min: float = 1e-3, ell_max: float = 1e3, roughness: float = 1e-2) -> callable:
+def get_path_to_data_processed_dir() -> Path:
     """
-    Generates a lengthscale function based on input-output pairs.
-
-    Parameters:
-        x (torch.Tensor): Input tensor of shape (N, 1).
-        y (torch.Tensor): Output tensor of shape (N, 1).
-        ell_min (float): Minimum lengthscale value.
-        ell_max (float): Maximum lengthscale value.
-        roughness (float): Roughness parameter for the lengthscale function.
-
-    Returns:
-        callable: A function that takes an input tensor and returns the corresponding lengthscale tensor.
+    Get the path to the data/processed directory, which is assumed to be two levels up from this file.
     """
-    # Fit a simple linear model to the data
+    current_file_path = Path(__file__).resolve()
+    data_processed_dir = current_file_path.parents[2] / "data" / "processed"
+    return data_processed_dir
 
-    ones = torch.ones_like(x)
-    A = torch.cat([x.reshape(-1, 1), ones.reshape(-1, 1)], dim=1)  # Add a bias term
-    solution, _, _, _, = torch.linalg.lstsq(y.reshape(-1, 1), A)
-    slope, intercept = solution[0][0], solution[0][1]
-    def lengthscale_fn(input_tensor: torch.Tensor) -> torch.Tensor:
-        # Compute the lengthscale based on the linear model
-        lengthscale = slope * input_tensor + intercept
+def test_lengthscale_func_2d():
+    # test actual parameters - read them in from data
+    
+    import pandas as pd
+    import numpy as np
 
-        # Apply roughness and clamp to specified bounds
-        lengthscale = torch.clamp(lengthscale, min=ell_min, max=ell_max)
-        lengthscale = lengthscale + roughness * torch.randn_like(lengthscale)
+    param_df = pd.read_csv(get_path_to_data_processed_dir() / "MLP001_params.csv")
+    temps, socs = param_df["Temperature_degC"].to_numpy(), param_df["SOC"].to_numpy()
+    print("testing the lengthscale function:")
+    lengthscales = lengthscale_func_2d(torch.tensor(np.column_stack([temps, socs]), dtype=torch.float32))
+    l_temp, l_soc = lengthscales[:, 0], lengthscales[:, 1]
+    print("l_soc min:", l_soc.min().item(), "l_soc max:", l_soc.max().item())
+    print("l_temp min:", l_temp.min().item(), "l_temp max:", l_temp.max().item())
 
-        return lengthscale
+    print("testing the generation of K:")
+    X = torch.tensor(np.column_stack([temps, socs]), dtype=torch.float32)
+    kernel = GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func_2d, variance=1.0) # with unit variance.
+    K_star = kernel.forward(X)
+    eigvals = torch.linalg.eigvalsh(K_star)
+    print("Minimum eigenvalue for K:", eigvals.min().item())
 
-    return lengthscale_fn
-
-
-def create_posterior_distribution(kernel, X_train, y_train, X_star, noise_variance=1e-2):
-    """
-    Creates a posterior distribution for the Gaussian Process given training data.
-
-    Parameters:
-        kernel (GibbsKernel): The Gibbs kernel to use for the GP.
-        X_train (torch.Tensor): Training input data of shape (N, D).
-        y_train (torch.Tensor): Training output data of shape (N, 1).
-        X_star (torch.Tensor): Test input data of shape (M, D).
-        noise_variance (float): Variance of the observation noise.
-    """
-    K_xx = kernel(X_train, X_train)
-    K_xs = kernel(X_train, X_star)
-    K_ss = kernel(X_star, X_star)
-
-    L = torch.linalg.solve(K_xx + noise_variance * torch.eye(len(X_train)), K_xs)
-
-    posterior_cov = K_ss - K_xs.T @ L
-    alpha = torch.linalg.solve(K_xx + noise_variance * torch.eye(len(X_train)), y_train)
-
-    posterior_mean = K_xs.T @ alpha
-
-    return posterior_mean, posterior_cov
+    print("Maximum eigenvalue for K:", eigvals.max().item())
 
 
-def sample_from_posterior(posterior_mean, posterior_cov, num_samples=1):
-    """
-    Samples from the posterior distribution of the Gaussian Process.
+def visualise_lengthscale_func_2d():
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-    Parameters:
-        posterior_mean (torch.Tensor): Mean of the posterior distribution of shape (M, 1).
-        posterior_cov (torch.Tensor): Covariance matrix of the posterior distribution of shape (M, M).
-        num_samples (int): Number of samples to draw from the posterior.
+    # create a grid of temperature and SOC values
+    temp_vals = np.linspace(5, 40, 100)
+    soc_vals = np.linspace(0.1, 1, 100)
+    temp_grid, soc_grid = np.meshgrid(temp_vals, soc_vals)
+    x_grid = np.column_stack([temp_grid.ravel(), soc_grid.ravel()])
 
-    Returns:
-        torch.Tensor: Samples drawn from the posterior distribution of shape (num_samples, M).
-    """
-    mvn = dist.MultivariateNormal(posterior_mean.flatten(), covariance_matrix=posterior_cov)
-    samples = mvn.sample((num_samples,))
-    return samples
+    # compute lengthscales for the grid
+    lengthscales = lengthscale_func_2d(torch.tensor(x_grid, dtype=torch.float32))
+    l_temp, l_soc = lengthscales[:, 0].numpy(), lengthscales[:, 1].numpy()
 
+    # reshape for plotting
+    l_temp_grid = l_temp.reshape(temp_grid.shape)
+    l_soc_grid = l_soc.reshape(soc_grid.shape)
 
+    # plot lengthscale for temperature
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.contourf(temp_grid, soc_grid, l_temp_grid, levels=20, cmap='viridis')
+    plt.colorbar(label='Lengthscale (Temperature)')
+    plt.xlabel('Temperature (°C)')
+    plt.ylabel('SOC')
+    plt.title('Lengthscale Function for Temperature')
 
-def generate_length_scale_function1(x: torch.Tensor, y: torch.Tensor, ell_min: float = 1e-3, ell_max: float = 1e3, roughness: float = 1e-2,spline_s: float = 0.0) -> callable:
-    x_np = x.numpy().reshape(-1)
-    y_np = y.numpy().reshape(-1)
+    # plot lengthscale for SOC
+    plt.subplot(1, 2, 2)
+    plt.contourf(temp_grid, soc_grid, l_soc_grid, levels=20, cmap='viridis')
+    plt.colorbar(label='Lengthscale (SOC)')
+    plt.xlabel('Temperature (°C)')
+    plt.ylabel('SOC')
+    plt.title('Lengthscale Function for SOC')
 
-    k = min(2, len(x) - 1)
-    spline = UnivariateSpline(x_np, y_np, k=k, s=spline_s)
-    dspline = spline.derivative()
-
-    def lengthscale_fn(input_tensor: torch.Tensor) -> torch.Tensor:
-        xt = input_tensor.reshape(1, -1)
-        xt_clamp = torch.clamp(xt, min=x.min().item(), max=x.max().item())
-        local_slope = dspline(xt_clamp)**2
-
-        # high roughness => smaller lengthscale.
-        lengthscale = ell_min + (ell_max - ell_min) / (1.0 + roughness * local_slope)
-
-        return torch.tensor(lengthscale).reshape(-1, 1) # reshape to N,1
-
-    return lengthscale_fn
-
-
-def test_generate_length_scale_function():
-    # Generate synthetic data
-    x = torch.linspace(0, 10, 100).reshape(-1, 1)
-    y = 2 * x + 5 + torch.randn_like(x) * 0.5  # Linear relationship with noise
-
-    # Generate lengthscale function
-    lengthscale_fn = generate_length_scale_function1(x, y)
-
-    # Test the lengthscale function on new inputs
-    test_inputs = torch.tensor([[0.0], [5.0], [10.0]])
-    lengthscales = lengthscale_fn(test_inputs)
-
-    print("Test Inputs:\n", test_inputs)
-    print("Lengthscales:\n", lengthscales)
-
-
-def test_generate_length_scale_function_with_kernel():
-    # Generate synthetic data
-    x = torch.linspace(0, 10, 100).reshape(-1, 1)
-    y = 2 * x + 5 + torch.randn_like(x) * 0.5  # Linear relationship with noise
-
-    # Generate lengthscale function
-    lengthscale_fn = generate_length_scale_function1(x, y)
-    print(lengthscale_fn(x))
-    print(generate_length_scale_function(x, y)(x))
-    # Create Gibbs kernel with the generated lengthscale function
-    kernel = GibbsKernel(input_dim=1, lengthscale_fn=lengthscale_fn)
-
-    # Test the kernel on new inputs
-    kernel._ell(x)
-    test_inputs = torch.tensor([[0.0], [5.0], [10.0]])
-    #K = kernel.forward(test_inputs)
-
-    print("Test Inputs:\n", test_inputs)
-    print("Kernel Matrix:\n", K)
+    plt.tight_layout()
+    plt.show()
+    
 
 
 if __name__ == "__main__":
-
-    #test_generate_length_scale_function()
-    test_generate_length_scale_function_with_kernel()
+    visualise_lengthscale_func_2d() 
+    
         

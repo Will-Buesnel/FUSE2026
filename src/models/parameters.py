@@ -23,6 +23,7 @@ class ParameterInterpolator:
 
     def __init__(self, temps, socs, values, method="clough_tocher"):
         points = np.column_stack([temps, socs])
+        self.initialise_bounds(socs=socs, temps=temps)
         if method == "clough_tocher":
             self._interp = scipy.interpolate.CloughTocher2DInterpolator(points, values)
         elif method == 'rbf':
@@ -32,19 +33,33 @@ class ParameterInterpolator:
         else:
             raise ValueError(f"Unknown method: {method}")
 
+
+    def initialise_bounds(self, socs, temps):
+        self.lowerbound_soc, self.upperboundsoc = socs.min(), socs.max()
+        self.lowerbound_temp, self.upperboundtemp = temps.min(), temps.max()
+
     def __call__(self, soc, T):
         # vectorized: soc, T can be scalars or arrays
         soc_arr, T_arr = np.broadcast_arrays(soc, T)
         # makes sure the arrays are the same shape, so they can be passed to the interpolator.
         # this would only be a problem in the electric-only or thermal-only case.
         pts = np.stack([T_arr.ravel(), soc_arr.ravel()], axis=-1)
-        result = self._interp(pts)
+        try:
+         result = self._interp(pts)
+        except ValueError as e:
+            print(f"Error in ParameterInterpolator: {e}")
+            result = np.full(pts.shape[0], -1000.0)  # return a large negative value to indicate extrapolation
         # check for Nans, which would indicate extrapolation.
         if np.any(np.isnan(result)):
-            raise ValueError(f"ParameterInterpolator extrapolated at soc={soc}, T={T}")
+            # check for how it has extrapolated.
+            if soc < self.lowerbound_soc or soc > self.upperboundsoc or T < self.lowerbound_temp or T > self.upperboundtemp:
+                result = np.clip(result, a_min=self._interp([self.lowerbound_temp, self.lowerbound_soc]), a_max=self._interp([self.upperbound_temp, self.upperboundsoc]))
+                print(f"ParameterInterpolator extrapolated at soc={soc}, T={T}, clamping to nearest result.")
+            # clamp to nearest result:
+
         return result.reshape(soc_arr.shape)
     
-class ParamFunction:
+class ParameterFunction:
     """
     Includes a parameter Interpolator + a single realisation of a Gaussian
     Process (unconditioned kernel) added on top, to represent one consistent
@@ -118,12 +133,12 @@ def get_parameter_interpolant(df: pd.DataFrame, column_name: str, method="clough
     return {column_name: ParameterInterpolator(temps, socs, param, method=method)}
 
 
-def get_parameter_function(df: pd.DataFrame, column_name: str, eps_sample) -> ParamFunction:
+def get_parameter_function(df: pd.DataFrame, column_name: str, eps_sample) -> ParameterFunction:
     """
-    Load parameter data from a CSV file and create a ParamFunction for the specified parameter.
+    Load parameter data from a CSV file and create a ParameterFunction for the specified parameter.
     The CSV file should have columns: 'Temperature_degC', 'SOC', 'R0 [Ohm]', 'R1 [Ohm]', 'R2 [Ohm]', 'tau1 [s]', 'tau2 [s]'.
-    The function will compute C1 and C2 from tau1/R1 and tau2/R2, respectively, and create ParamFunctions for R0, R1, R2, C1, and C2 as functions of SOC and Temperature.
-    Returns a dictionary of ParamFunction objects for each parameter.
+    The function will compute C1 and C2 from tau1/R1 and tau2/R2, respectively, and create ParameterFunctions for R0, R1, R2, C1, and C2 as functions of SOC and Temperature.
+    Returns a dictionary of ParameterFunction objects for each parameter.
 
     Currently it uses the same interpolation method for all parameters.
     """
@@ -139,7 +154,7 @@ def get_parameter_function(df: pd.DataFrame, column_name: str, eps_sample) -> Pa
     socs = df["SOC"].to_numpy()
     param = df[column_name].to_numpy()
 
-    return ParamFunction(socs, temps, param, eps_sample)
+    return ParameterFunction(socs, temps, param, eps_sample)
 
 
 def get_all_parameter_interpolants(paramdf: pd.DataFrame, ocvdf: pd.DataFrame, method="clough_tocher") -> dict:

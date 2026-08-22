@@ -6,7 +6,7 @@ def main():
     # Load the experimental data
     exp_data_path = get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_deq.csv"
     experiment_df = pd.read_csv(exp_data_path)
-    idxes = [50000, 100000, 150000, 200000, 250000, 320000, 360000]  # specify the indices where you want to draw vertical lines
+    idxes = [ 334000, 344000]  # specify the indices where you want to draw vertical lines
     plt.figure(figsize=(12, 6))
     plt.plot(experiment_df["deq_Elapsed Time[h]"], experiment_df["Voltage(V)"], label="Voltage")
     for index in idxes:
