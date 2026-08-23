@@ -35,8 +35,8 @@ class ParameterInterpolator:
 
 
     def initialise_bounds(self, socs, temps):
-        self.lowerbound_soc, self.upperboundsoc = socs.min(), socs.max()
-        self.lowerbound_temp, self.upperboundtemp = temps.min(), temps.max()
+        self.lowerbound_soc, self.upperbound_soc = socs.min(), socs.max()
+        self.lowerbound_temp, self.upperbound_temp = temps.min(), temps.max()
 
     def __call__(self, soc, T):
         # vectorized: soc, T can be scalars or arrays
@@ -52,8 +52,8 @@ class ParameterInterpolator:
         # check for Nans, which would indicate extrapolation.
         if np.any(np.isnan(result)):
             # check for how it has extrapolated.
-            if soc < self.lowerbound_soc or soc > self.upperboundsoc or T < self.lowerbound_temp or T > self.upperboundtemp:
-                result = np.clip(result, a_min=self._interp([self.lowerbound_temp, self.lowerbound_soc]), a_max=self._interp([self.upperbound_temp, self.upperboundsoc]))
+            if soc < self.lowerbound_soc or soc > self.upperbound_soc or T < self.lowerbound_temp or T > self.upperbound_temp:
+                result = np.clip(result, a_min=self._interp([self.lowerbound_temp, self.lowerbound_soc]), a_max=self._interp([self.upperbound_temp, self.upperbound_soc]))
                 print(f"ParameterInterpolator extrapolated at soc={soc}, T={T}, clamping to nearest result.")
             # clamp to nearest result:
 

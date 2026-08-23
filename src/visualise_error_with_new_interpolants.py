@@ -50,9 +50,9 @@ def _manually_take_mean_of_df_rows(df: pd.DataFrame) -> pd.Series:
             mean_series[col] = df[col].mean()
     return mean_series
 
-def get_r0_eps(param_df: pd.DataFrame = None) -> np.ndarray:
-    add_eps_stand = import_sample_from_results("test.pt", method="All")["eps_R0 [Ohm]_standardised"]
-    var = import_sample_from_results("test.pt", method="All")["var_scaled"] * 1e-6
+def get_r0_eps(param_df: pd.DataFrame = None, mc_filename: str = "test.pt") -> np.ndarray:
+    add_eps_stand = import_sample_from_results(mc_filename, method="All")["eps_R0 [Ohm]_standardised"]
+    var = import_sample_from_results(mc_filename, method="All")["var_scaled"] * 1e-6
     kernel = GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func_2d, variance=var)
 
     # forward the kernel to get the covariance matrix for the parameter function:
@@ -64,10 +64,19 @@ def get_r0_eps(param_df: pd.DataFrame = None) -> np.ndarray:
 def main():
     set_rc_params()
     param_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_params.csv")
-    r0_eps = get_r0_eps(param_df)
-    phys_exp_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_deq.csv")
+    r0_eps = get_r0_eps(param_df, mc_filename="InitialResults.pt")
+    phys_exp_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_shortened.csv")
+    phys_exp_df = phys_exp_df.iloc[:int(len(phys_exp_df) * 0.9)]  # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
+    # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
     eval_times = phys_exp_df["deq_Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds
-    sim = generate_standard_simulator()
+
+    sim = generate_standard_simulator(stop_idx=len(eval_times)-1, use_deq=False)
+    # for the sake of debugging, plot the training data given to the simulator, to check it is getting a fair chance.
+    plt.plot(sim.exp_df["Elapsed Time[h]"] * 3600, sim.exp_df["Current(A)"], label="Training Data", color="green")
+    plt.show()
+
+
+
     res_std = sim.run_simulation(pbar=True, t_eval=eval_times)
 
     # add the gaussian-process-simulated epsilons to the simulator, and run the simulation again:
@@ -85,8 +94,36 @@ def main():
     print(f"Original overall error: {np.linalg.norm(orig_abs_error)}")
     print(f"New overall error: {np.linalg.norm(new_abs_error)}")
 
+    # plot the simulation results + physicaly experiment. Three subplots; one for the current, one for voltage, & one for the error.
 
-    # print the different interpolants for R0 at 25 deg to see the variance in shapes.
+
+
+    fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    axs[0].plot(eval_times, phys_exp_df["Current(A)"], label="Physical Experiment", color="green", linewidth=2)
+    axs[0].plot(eval_times, res_std["I [A]"], label="Default Simulation", color="blue", linestyle="--")
+    #axs[0].plot(eval_times, sim_results["I [A]"], label="Simulation with new interpolants", color="red", linestyle="--")
+    axs[0].set_ylabel("Current [A]")
+    axs[0].legend()
+
+
+    axs[1].plot(eval_times, phys_exp_df["Voltage(V)"], label="Physical Experiment", color="black", linewidth=2)
+    axs[1].plot(eval_times, res_std["v_cell [V]"], label="Default Simulation", color="blue", linestyle="--")
+    #axs[1].plot(eval_times, sim_results["v_cell [V]"], label="Simulation with new interpolants", color="red", linestyle="--")
+    axs[1].set_ylabel("Voltage [V]")
+    axs[1].legend()
+
+    axs[2].plot(eval_times, orig_abs_error, label="Default Simulation Error", color="brown", linestyle="--")
+    axs[2].plot(eval_times, new_abs_error, label="Simulation with new interpolants Error", color="red", linestyle="--")
+    axs[2].set_xlabel("Time [s]")
+    axs[2].set_ylabel("Absolute Error [V]")
+    axs[2].legend()
+
+    plt.tight_layout()
+    plt.show()
+    
+
+
+
 
 
 def test_manually_take_mean_of_df_rows():

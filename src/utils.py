@@ -275,17 +275,27 @@ def graph_model_outputs(sim, gauss_interps: list[tuple[str, object]] = None, y0:
 # ------------------------------------------------------------------------------------------
 
 
-def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value'):
+def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value', multiple_chains: bool = False):
         """
         Plot the parameter values against a given x value for each iteration of the inference process. This function is useful for visualizing how the parameter values evolve over iterations.
+        Multiple chains can be plotted if the `multiple_chains` flag is set to True. In this case, the Ys array should have shape (nchains, n_iterations, n_points).
         """
-        n_iterations = len(Ys)
+        n_iterations = len(Ys[0] if multiple_chains else Ys)  # number of iterations is the length of the first dimension if multiple chains, otherwise it's the length of Ys
+        n_chains = Ys.shape[0] if multiple_chains else 1
 
         fig, ax = plt.subplots(figsize=(10, 6))
         plt.subplots_adjust(bottom=0.25)  # leave room for the slider
 
+        lines = []
+
         # initial plot (iteration 0)
-        line, = ax.plot(xs, Ys[0, :], marker="o", label="Iteration 0")
+        if multiple_chains:
+            for chain in range(n_chains):
+                line, = ax.plot(xs, Ys[chain, 0, :], marker="o", label=f"Chain {chain+1} Iteration 0")
+                lines.append(line)
+        else:
+            line, = ax.plot(xs, Ys[0, :], marker="o", label="Iteration 0")
+            lines.append(line)
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
@@ -306,9 +316,13 @@ def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces O
         )
 
         def update(val):
+            print(f"Updating plot for iteration {val}...")
             idx = int(slider.val)
-            line.set_ydata(Ys[idx, :])
-            line.set_label(f"Iteration {idx}")
+            for i, line in enumerate(lines):
+                if multiple_chains:
+                    line.set_ydata(Ys[i, idx, :])
+                else:
+                    line.set_ydata(Ys[idx, :])
             ax.legend()
             fig.canvas.draw_idle()
 

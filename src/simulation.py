@@ -90,7 +90,12 @@ class Simulator:
                 raise InvalidProposal(f"Cholesky decomposition failed for parameter {name}. Check the covariance matrix and hyperparameters.") from e
             
             #print("sampling eps_standardised from a gaussian process with mean0 and variance: 1", )
-            eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df), dtype=L.dtype), torch.ones(len(self.param_df), dtype=L.dtype)).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
+            # going to try reducing the state space of the model by only sampling the epsilons for 25 degrees; the rest can go to zero. This is because the model is only trained at 25 degrees, so the other temperatures are not well constrained. This will reduce the state space and make the inference more stable.
+            param_df_25_deg_indexes = self.param_df[self.param_df["Temperature_degC"] == 25].index.to_numpy()
+            eps_standardised = torch.zeros(len(self.param_df), dtype=L.dtype)  # initialise
+            eps_standardised[param_df_25_deg_indexes] = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(param_df_25_deg_indexes), dtype=L.dtype), torch.ones(len(param_df_25_deg_indexes), dtype=L.dtype)).to_event(1))
+
+            #eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df), dtype=L.dtype), torch.ones(len(self.param_df), dtype=L.dtype)).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
      
             eps_sample = L @ eps_standardised
             # debug: force eps_sample to be zero for now, to check that the model works without noise.
@@ -101,12 +106,6 @@ class Simulator:
             self.param_interpolants[name] = get_parameter_function(self.param_df, name, eps_sample.detach().numpy())  # detach to avoid backprop through the sampling process
                                                                                                                     # maybe it is better to take a copy for this?
 
-
-            # debug; get the parameter function for temp = 25degC
-            socs = np.linspace(0.1, 1, 100)
-            r0_func = self.param_interpolants[name]
-            r0_values = [r0_func(soc, 25) for soc in socs]
-            pyro.deterministic(f"{name}_values_at_25degC", torch.tensor(r0_values, dtype=torch.float32))  # record the parameter values at 25degC for debugging
 
     def set_cell_capacity(self, capacity_Ah: float):
         self.cell.capacity_Ah = capacity_Ah
