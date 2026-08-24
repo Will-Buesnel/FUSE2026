@@ -33,10 +33,29 @@ class ParameterInterpolator:
         else:
             raise ValueError(f"Unknown method: {method}")
 
-
     def initialise_bounds(self, socs, temps):
         self.lowerbound_soc, self.upperbound_soc = socs.min(), socs.max()
         self.lowerbound_temp, self.upperbound_temp = temps.min(), temps.max()
+
+    def _clip_to_bounds(self, result, soc, T):
+        nan_mask = np.isnan(result)
+        if np.any(nan_mask):
+            print(f"Warning: Extrapolation detected in ParameterInterpolator. Clamping to bounds. {np.sum(nan_mask)} points were out of bounds.")
+            soc_flat = soc.ravel()
+            T_flat = T.ravel()
+            out_of_bounds = (
+                (soc_flat < self.lowerbound_soc)
+                | (soc_flat > self.upperbound_soc)
+                | (T_flat < self.lowerbound_temp)
+                | (T_flat > self.upperbound_temp)
+            )
+            to_clamp = nan_mask & out_of_bounds
+            if np.any(to_clamp):
+                lower_val = self._interp([self.lowerbound_temp, self.lowerbound_soc]).item()
+                upper_val = self._interp([self.upperbound_temp, self.upperbound_soc]).item()
+                below = (soc_flat < self.lowerbound_soc) | (T_flat < self.lowerbound_temp)
+                clamped_vals = np.where(below, lower_val, upper_val)
+                result[to_clamp] = clamped_vals[to_clamp]
 
     def __call__(self, soc, T):
         # vectorized: soc, T can be scalars or arrays
@@ -51,11 +70,7 @@ class ParameterInterpolator:
             result = np.full(pts.shape[0], -1000.0)  # return a large negative value to indicate extrapolation
         # check for Nans, which would indicate extrapolation.
         if np.any(np.isnan(result)):
-            # check for how it has extrapolated.
-            if soc < self.lowerbound_soc or soc > self.upperbound_soc or T < self.lowerbound_temp or T > self.upperbound_temp:
-                result = np.clip(result, a_min=self._interp([self.lowerbound_temp, self.lowerbound_soc]), a_max=self._interp([self.upperbound_temp, self.upperbound_soc]))
-                print(f"ParameterInterpolator extrapolated at soc={soc}, T={T}, clamping to nearest result.")
-            # clamp to nearest result:
+            self._clip_to_bounds(result, soc_arr, T_arr)
 
         return result.reshape(soc_arr.shape)
     

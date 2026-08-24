@@ -50,8 +50,13 @@ def _manually_take_mean_of_df_rows(df: pd.DataFrame) -> pd.Series:
             mean_series[col] = df[col].mean()
     return mean_series
 
-def get_r0_eps(param_df: pd.DataFrame = None, mc_filename: str = "test.pt") -> np.ndarray:
-    add_eps_stand = import_sample_from_results(mc_filename, method="All")["eps_R0 [Ohm]_standardised"]
+def get_r0_eps(param_df: pd.DataFrame = None, mc_filename: str = "test.pt", deg_25_only: bool = True) -> np.ndarray:
+    if deg_25_only:
+        add_eps_stand = torch.zeros(len(param_df), dtype=torch.float64)
+        deg_25_indexes = param_df[param_df["Temperature_degC"] == 25].index.to_numpy()
+        add_eps_stand[deg_25_indexes] = torch.tensor(import_sample_from_results(mc_filename, method="All")["eps_R0 [Ohm]_standardised"], dtype=torch.float64)
+    else:
+        add_eps_stand = import_sample_from_results(mc_filename, method="All")["eps_R0 [Ohm]_standardised"]
     var = import_sample_from_results(mc_filename, method="All")["var_scaled"] * 1e-6
     kernel = GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func_2d, variance=var)
 
@@ -64,18 +69,13 @@ def get_r0_eps(param_df: pd.DataFrame = None, mc_filename: str = "test.pt") -> n
 def main():
     set_rc_params()
     param_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_params.csv")
-    r0_eps = get_r0_eps(param_df, mc_filename="InitialResults.pt")
+    r0_eps = get_r0_eps(param_df, mc_filename="test6.pt", deg_25_only=True)  # get the epsilons for R0 from the MC results, and apply them to the simulator.
     phys_exp_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_shortened.csv")
     phys_exp_df = phys_exp_df.iloc[:int(len(phys_exp_df) * 0.9)]  # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
     # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
     eval_times = phys_exp_df["deq_Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds
 
     sim = generate_standard_simulator(stop_idx=len(eval_times)-1, use_deq=False)
-    # for the sake of debugging, plot the training data given to the simulator, to check it is getting a fair chance.
-    plt.plot(sim.exp_df["Elapsed Time[h]"] * 3600, sim.exp_df["Current(A)"], label="Training Data", color="green")
-    plt.show()
-
-
 
     res_std = sim.run_simulation(pbar=True, t_eval=eval_times)
 

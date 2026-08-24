@@ -49,6 +49,60 @@ _obs_scale = OBS_EPS**0.5 * torch.ones(SIM_TIMESTEPS)  # observation noise for t
 RND_SEED = 42
 pyro.set_rng_seed(RND_SEED)
 
+
+# ---------------------------------------------------------------
+
+class BayesianModelParams:
+    """
+    DataClass to hold the parameters for the Bayesian model. This is used to pass parameters to the model and guide functions.
+    """
+    def __init__(self, var_scaled_det: float = VAR_INITIAL_GUESS, obs_scale_det: float = OBS_EPS**0.5):
+        self.var_scaled_det = var_scaled_det
+        self.obs_scale_det = obs_scale_det
+
+    def set_gaussian_process_size(self, size: int = 25):
+        self.gaussian_process_size = size
+
+    def set_variational_params(self, variational_params_dict: dict = {"obs_scale": [1e-2, 1, True, 1e-2], "var_scaled": [1e-6, 1, True, 1e-6], "eps_R0 [Ohm]_standardised": [1, 25, True, 1e-2]}): # list of [scaling, size, is variational, c0scaling]
+        self.variational_params = variational_params_dict
+        
+        # set dimensionality of the variational parameters
+        self.set_total_dimensionality()
+
+    def is_variational_param(self, param_name: str) -> bool:
+        return self.variational_params.get(param_name)[2]  # return the third element of the list, which is a boolean indicating if the parameter is variational or not.
+
+    def set_total_dimensionality(self):
+        total_dim = 0
+        for _, (_, size, is_variational) in self.variational_params.items():
+            if is_variational:
+                total_dim += size
+        self.param_dim = total_dim
+
+    def get_total_dimensionality(self) -> int:
+        return self.param_dim
+
+    def generate_c0(self):
+        c0 = torch.zeros(self.param_dim, self.param_dim, dtype=torch.float64)
+        running_idx = 0
+        for param_name, (scaling, size, is_variational, c0_scaling) in self.variational_params.items():
+            if is_variational:
+                start_idx = running_idx
+                end_idx = start_idx + size
+                c0[start_idx:end_idx, start_idx:end_idx] = torch.eye(size, dtype=torch.float64) * c0_scaling # for now will assume the c0 scaling is always that parameters are independent.
+                # this isn't necessarily true; but any additional bias would be better to be learned by the model rather than hardcoded in.
+                running_idx = end_idx
+
+        return c0
+
+    def toDict(self):
+        return {
+            "var_scaled": self.var_scaled_det,
+            "obs_scale": self.obs_scale_det,
+            "variational_params": self.variational_params,
+            "param_dim": self.param_dim
+        }
+
 # PYRO INFERENCE MODEL AND GUIDE --------------------------
 
 param_interpolants_debug = [] # these need to be deepcopies so that they don't change over time.
@@ -57,9 +111,22 @@ temperatures_debug = [] # these need to be deepcopies so that they don't change 
 def model(simulator: Simulator, obs=None):
     # assume y0 is already set before optimisation.
     
-    var_scaled = pyro.sample("var_scaled", dist.Uniform(0., 1.0))  # order-1 scale
-    var = pyro.deterministic("var", var_scaled * 1e-6)
-    obs_scale = pyro.sample("obs_scale", dist.Uniform(0., 1e-2))
+    # below could probably be cleaned up a little bit sorry.
+    if simulator.bayes_model_params.is_variational_param("var_scaled"):
+        var_scaled = pyro.sample("var_scaled", dist.HalfNormal(1.0))  # order-1 scale
+    else:
+        var_scaled = simulator.bayes_model_params.var_scaled_det
+
+    if simulator.bayes_model_params.is_variational_param("obs_scale"):
+        obs_scale = pyro.sample("obs_scale", dist.HalfNormal(1.0))  # order-1 scale
+    else:
+        obs_scale = simulator.bayes_model_params.obs_scale_det
+
+    var_scaled = pyro.sample("var_scaled", dist.HalfNormal(1.0))  # order-1 scale
+
+    var = pyro.deterministic("var", var_scaled * simulator.bayes_model_params.variational_params.get("var_scaled")[0])  
+    obs_scale = pyro.sample("obs_scale", dist.HalfNormal(1.0))  # order-1 scale
+    obs_var = pyro.deterministic("obs_var", obs_scale * simulator.bayes_model_params.variational_params.get("obs_scale")[0]) 
 
     gauss_interps_q = [("R0 [Ohm]", {"lengthscale_func": lengthscale_func_2d, "variance": var})]  # variational parameters for the Gaussian noise
 
@@ -78,17 +145,26 @@ def model(simulator: Simulator, obs=None):
 
     pyro.sample(
     "obss",
-    dist.Normal(output, obs_scale).to_event(1),
+    dist.Normal(output, obs_var).to_event(1),
     obs=obs
 )
 
-def penalty_function(samples):
-    if samples[3:].any() > 1e-3:
-        return np.inf   
+
+def construct_c0_gp_matrix(pram_df, lengthscale_func, variance):
+    kernel = GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func, variance=variance)
+    X = np.column_stack([pram_df["Temperature_degC"].to_numpy(), pram_df["SOC"].to_numpy()])
+    K = kernel.forward(torch.tensor(X, dtype=torch.float64))
+    deg_25_indexes = pram_df[pram_df["Temperature_degC"] == 25].index.to_numpy()
+    c0 = K[deg_25_indexes, :][:, deg_25_indexes].detach() # only take the 25 deg rows as this is what is being sampled.
+    return torch.diag(c0)# return the diagonal as I only want to take the scale from this. Also as the baseline assumption is that samples are independent; will allow monte carlo to build correlations between samples without unncessary bias.
+
 
 def run_inference_MCMC(simulator: Simulator, obs=None, warmup_steps=100, num_samples=1000, num_chains=1, adapt_start=800, **kwargs):
-    # currently hardcoded the shape of c0; again bad practice by me sorry. Just trying some things out; hopefully I get around to fixing it.
-    kernel = AdaptiveMetropolisHastings(model=model, target_accept_prob=0.234, adapt_start = adapt_start, c0=torch.eye(25, dtype=torch.float64)*1e-4, init_step_size=1e-4)  # use an adaptive Metropolis-Hastings kernel for MCMC inference
+    # simulator must have a bayes_model_params attribute set before running this function. This is used to set the variational parameters for the model.
+
+    c0 = simulator.bayesian_model_params.generate_c0()  # use the simulator's method to generate the c0 matrix
+
+    kernel = AdaptiveMetropolisHastings(model=model, target_accept_prob=0.234, adapt_start = adapt_start, c0=c0)  # use an adaptive Metropolis-Hastings kernel for MCMC inference
     #kernel.penalty_function = penalty_function  # set the penalty function for the kernel. This is used to reject proposals that are invalid.
     # currently I am hardcoding the c0 matrix, but ideally its size/shape should be able to be inferred/set adaptively.
 
@@ -168,7 +244,7 @@ def compute_diag_stats_on_samples(samples: pd.DataFrame, extra_exclude_cols=None
 # ----------------------------------------------------------
 
 
-def generate_standard_simulator(start_idx=0, stop_idx=70000, use_deq=True, stochastic=True):
+def generate_standard_simulator(start_idx=0, stop_idx=70000, use_deq=True, stochastic=True, bayes_model_params: BayesianModelParams = None):
     root = Path.cwd().resolve()
     processed_data_dir = root / "data" / "processed"
     param_df = pd.read_csv(processed_data_dir / "MLP001_params.csv")
@@ -207,15 +283,19 @@ def generate_standard_simulator(start_idx=0, stop_idx=70000, use_deq=True, stoch
         gauss_interps = None  # no Gaussian noise interpolants for the deterministic model
 
     sim = Simulator(wltp_df, ocv_df, param_df, lp_cell, gauss_interps=gauss_interps, t_eval = wltp_df[time_column].to_numpy() * 3600)
-    initial_voltage = sim.exp_df["Voltage(V)"].iloc[0]  # get the initial voltage from the experiment data. this is commented out as its only used when we dont simulate from the start.
+   
     # get initial soc via interpolation of the ocv_df
-    #initial_soc = np.interp(initial_voltage, sim.ocv_df["OCV[V]"].to_numpy(), sim.ocv_df["SOC"].to_numpy())
+   
     initial_soc = 1
     initial_temp = 26.0  # initial temperature in degrees Celsius. Ideally I would use the one from the experimentdf, but I don't trust it.
     # When we generate comprehensive data, we will start from t0, skipping this problem entirely
     sim.y0 = [initial_soc, 0, 0, initial_temp]  # initial state: soc=
     sim.set_cell_capacity(2.15) # set the cell capacity to 2.15 Ah, which is a reasonable estimate for this cell. This was found to reduce model error at steady states.
-
+    if bayes_model_params is not None:
+        sim.set_bayesian_model_params(bayes_model_params)  # set the Bayesian model parameters for the simulator
+        print("Bayesian model parameters provided, running stochastic simulation with Bayesian inference.")
+    else:
+        print("No Bayesian model parameters provided, running deterministic simulation with default parameters.")
     return sim
 
 
@@ -235,20 +315,42 @@ def generate_sample_test(num_samples=NUM_SAMPLES, warmup_steps=WARMUP_STEPS, num
 
 
 def save_run(warmup_steps: int = 200, samples: int = 200, chains: int = 2, filename_prefix: str = "pred_samples_test_mulchains", **kwargs):
+
     output_dir = get_path_to_data_results_dir() / filename_prefix
     output_dir.mkdir(parents=True, exist_ok=True)
     samples, mcmc = generate_sample_test(warmup_steps=warmup_steps, num_samples=samples, num_chains=chains, **kwargs)  # generate samples from the model using MCMC inference
 
     save_pred_samples_to_pt(samples, get_path_to_data_results_dir() / f"{filename_prefix}"/ "samples.pt", with_time=False)  # save the samples to a .pt file
     pd.DataFrame(mcmc.diagnostics()).to_csv(get_path_to_data_results_dir() / f"{filename_prefix}" / "diagnostics.csv")  # save the diagnostics to a .csv file
-    
-def save_and_run_bayesian_mc_infer(warmup_steps: int = 200, samples: int = 200, chains: int = 1,
-                                    adapt_start: int = 300, start_idx: int = 334000, stop_idx: int = 350000, use_deq=True):
-    
-    filename_pref = f"MC_testing/AMH_Gibbs_indexes:{start_idx}:{stop_idx}_warmup:{warmup_steps}_samples:{samples}_chains:{chains}_adapt_{adapt_start}"  # prefix for the output files
-    save_run(warmup_steps=warmup_steps, samples=samples, chains=chains, filename_prefix=filename_pref, start_idx=start_idx, stop_idx=stop_idx, adapt_start=adapt_start, use_deq=use_deq)  # run the inference and save the samples and diagnostics
-    return filename_pref  # return the filename prefix for later use in plotting and analysis
 
+
+def create_file_name(warmup_steps: int = 200, samples: int = 200, chains: int = 1,
+                                    adapt_start: int = 300, start_idx: int = 334000, stop_idx: int = 350000, kernel_type="AMH", gp_kernel_type="Gibbs"):
+    return f"MC_testing/{kernel_type}_{gp_kernel_type}_reducedSS_indexes:{start_idx}:{stop_idx}_warmup:{warmup_steps}_samples:{samples}_chains:{chains}_adapt_{adapt_start}"  # prefix for the output files
+
+
+def save_and_run_bayesian_mc_infer(warmup_steps: int = 200, samples: int = 200, chains: int = 1,
+                                    adapt_start: int = 300, start_idx: int = 334000, stop_idx: int = 350000, filename: str = None, use_deq=True, bayes_model_params: BayesianModelParams = None):
+    
+    if filename is None:
+        filename_pref = f"MC_testing/AMH_Gibbs_reducedSS_indexes:{start_idx}:{stop_idx}_warmup:{warmup_steps}_samples:{samples}_chains:{chains}_adapt_{adapt_start}"  # prefix for the output files
+    else:
+        filename_pref = filename
+
+    save_run(warmup_steps=warmup_steps, samples=samples, chains=chains, filename_prefix=filename_pref, start_idx=start_idx, stop_idx=stop_idx, adapt_start=adapt_start, use_deq=use_deq, bayes_model_params=bayes_model_params)  # run the inference and save the samples and diagnostics
+    save_metadata = {
+        "warmup_steps": warmup_steps,
+        "samples": samples,
+        "chains": chains,
+        "adapt_start": adapt_start,
+        "start_idx": start_idx,
+        "stop_idx": stop_idx,
+        "use_deq": use_deq,
+        "bayes_model_params": bayes_model_params.toDict() if bayes_model_params is not None else None
+    }
+    pd.DataFrame([save_metadata]).to_csv(get_path_to_data_results_dir() / f"{filename_pref}" / "metadata.csv")  # save the metadata to a .csv file
+
+    return filename_pref  # return the filename prefix for later use in plotting and analysis
 
 
 def view_post_distributions(pred_samples, sim: Simulator):
@@ -269,38 +371,74 @@ def view_post_distributions(pred_samples, sim: Simulator):
     plt.legend()
     plt.show()
 
+
+def plot_r0_traces(samples_df: pd.DataFrame, param_df: pd.DataFrame, equiv_sampled_r0_values: np.ndarray):
+
+    kernels = [GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func_2d, variance=torch.tensor(samples_df["var_scaled"].iloc[index] * 1e-6, dtype=torch.float64)) for index in range(len(samples_df))]
+    X = np.column_stack([param_df["Temperature_degC"].to_numpy(), param_df["SOC"].to_numpy()])
+    Ks = [kernel.forward(torch.tensor(X, dtype=torch.float64)) for kernel in kernels]
+    Ls = [safe_cholesky(K) for K in Ks]
+
+    add_eps_stand = [torch.zeros(len(param_df), dtype=torch.float64) for _ in range(len(samples_df))]  # initialise a list of tensors to store the eps values for each sample.
+    deg_25_indexes = param_df[param_df["Temperature_degC"] == 25].index.to_numpy()
+
+    for eps_row, (index, samplesrow) in zip(add_eps_stand, samples_df.iterrows()):
+        eps_row[deg_25_indexes] = torch.tensor(samplesrow["eps_R0 [Ohm]_standardised"], dtype=torch.float64)
+
+    samples_df["eps_R0 [Ohm]_sample"] = [L @ eps.detach().clone()  for L, eps in zip(Ls, add_eps_stand)]
+
+    samples_df["r0_with_eps"] = np.nan  # create a new column for the r0 values with eps added to the regular interpolant values at the sampled SOC values.
+    samples_df["r0_with_eps"] = samples_df["r0_with_eps"].astype(object)  # set the dtype of the new column to object, so we can store arrays in it.
+    r0_array = np.zeros((len(samples_df["Chain"].unique()), len(samples_df["Iteration"].unique()), len(equiv_sampled_r0_values)), dtype=object)  # create an array to store the r0 values with eps added to the regular interpolant values at the sampled SOC values.
+
+    for chain in samples_df["Chain"].unique():
+        chain_df = samples_df[samples_df["Chain"] == chain]
+        chain_samples = []
+        for idx, row in chain_df.iterrows():
+            
+            eps_r0 = row["eps_R0 [Ohm]_sample"].detach().numpy()
+            # add the eps values to the regular interpolant values at the sampled SOC values
+            equiv_sampled_r0_values_with_eps = equiv_sampled_r0_values + eps_r0  # add the eps values to the regular interpolant values at the sampled SOC values
+            chain_samples.append(equiv_sampled_r0_values_with_eps)
+        chain_samples = np.array(chain_samples)
+
+        r0_array[chain-1, :, :] = chain_samples  # store the r0 values with eps added to the regular interpolant values at the sampled SOC values in the r0_array
+    
+    plot_traces(xs=range(len(r0_array[0,0])), Ys = r0_array, multiple_chains=True)
+    
+
 if __name__ == "__main__":
 
     start_idx = 0
     stop_idx = 70000
+
+
+    bayes_model_params = BayesianModelParams(var_scaled_det=VAR_INITIAL_GUESS, obs_scale_det=OBS_EPS**0.5)  # create an instance of the BayesianModelParams class
+    bayes_model_params.set_variational_params() # set with the default for now.
      
     set_rc_params()  # set the rc params for plotting
-    filename_pref = save_and_run_bayesian_mc_infer(warmup_steps=30, samples=30, chains=1, adapt_start=40, start_idx=start_idx, stop_idx=stop_idx, use_deq=False)  # run the inference and save the samples and diagnostics
+    filename_pref = save_and_run_bayesian_mc_infer(warmup_steps=10, samples=10, chains=1, adapt_start=6, start_idx=start_idx, stop_idx=stop_idx, use_deq=False)  # run the inference and save the samples and diagnostics
     
 
     # read the samples back in and convert to pandas dataframe
     samples_df = open_pred_samples_as_df(get_path_to_data_results_dir() / f"{filename_pref}/samples.pt", drop_index=False)
-    print(samples_df.head())
-    sim = generate_standard_simulator(start_idx=start_idx, stop_idx=stop_idx)  # generate a standard simulator for plotting the model outputs
-    sim.kwargs["max_step"] = 1  # set the max step size for the simulation to avoid numerical issues.
-    sim.kwargs["dense_output"] = False  # set the output to not be dense, to avoid running out of memory with large simulations.
-    sim.kwargs["pbar"] = False  # turn off the progress bar for the simulation, as it will be run multiple times.
-  
 
-
-    samples_tensor_dict = df_to_tensor_dict(samples_df, dtype=torch.float64)  # convert the samples dataframe to a dict of tensors for use in pyro Predictive
-
-    predictive_samples = { # need to remove grouping by chain.
-    name: val.reshape(-1, *val.shape[2:])
-    for name, val in samples_tensor_dict.items()
-}
+    # sim = generate_standard_simulator(start_idx=start_idx, stop_idx=stop_idx)  # generate a standard simulator for plotting the model outputs
+    # sim.kwargs["max_step"] = 1  # set the max step size for the simulation to avoid numerical issues.
+    # sim.kwargs["dense_output"] = False  # set the output to not be dense, to avoid running out of memory with large simulations.
+    # sim.kwargs["pbar"] = False  # turn off the progress bar for the simulation, as it will be run multiple times.
+    # samples_tensor_dict = df_to_tensor_dict(samples_df, dtype=torch.float64)  # convert the samples dataframe to a dict of tensors for use in pyro Predictive
+    # predictive_samples = { # need to remove grouping by chain.
+    # name: val.reshape(-1, *val.shape[2:])
+    # for name, val in samples_tensor_dict.items()
+# }
     #post = batched_tqdm_predictive(model, predictive_samples, sim)  # pyro expects a dict of tensors to be passed in.
     # save to a .pt file
     # save_pred_samples_to_pt(post, get_path_to_data_results_dir() / f"{filename_pref}/post_samples.pt", with_time=False)
     # save the last 40 eps samples to a .pt file for seeing if model has improved / plotting etc.
     
 
-    plot_mixing(samples_df, param_names=["obs_scale", "var_scaled"])  # plot the mixing of the R0 parameter
+    # plot_mixing(samples_df, param_names=["obs_scale", "var_scaled"])  # plot the mixing of the R0 parameter
 
     # do trace plot of the parameter interpolants for R0, which are stored in param_interpolants_debug. This is a list of lists of ParameterFunction objects, one for each MCMC sample.
     socs = np.linspace(0.1, 1, 100)
@@ -311,39 +449,22 @@ if __name__ == "__main__":
 
     regular_interpolant = generate_standard_simulator(start_idx=start_idx, stop_idx=stop_idx, stochastic=False).param_interpolants["R0 [Ohm]"]  # get the regular interpolant for R0 from the standard simulator
 
-
+    print("Checking eps standardised values for each chain (df):")
+    for chain in samples_df["Chain"].unique()[:1]:  # only check the first chain for brevity
+        chain_df = samples_df[samples_df["Chain"] == chain]
+        print(f"Chain {chain}:")
+        first_val = chain_df["eps_R0 [Ohm]_standardised"].iloc[0]
+        last_val = chain_df["eps_R0 [Ohm]_standardised"].iloc[-1]
+        print(f"First iteration eps_R0 [Ohm]_standardised: {first_val}")
+        print(f"Last iteration eps_R0 [Ohm]_standardised: {last_val}")
+        print(f"Difference: {last_val - first_val}")
 
     param_df = pd.read_csv(get_path_to_data_processed_dir() / "MLP001_params.csv")  # read in the parameter dataframe
+
     sampled_socs = param_df["SOC"].to_numpy()  # get the SOC values from the parameter dataframe
     equiv_sampled_r0_values = np.array([regular_interpolant(soc, temp) for soc in sampled_socs])  # get the R0 values from the regular interpolant at the sampled SOC values
 
-
     # add eps values to the regular interpolant values to get more context for the eventual trace plot of this.
     # create new column in the samples_df for the r0 values with eps added to the regular interpolant values at the sampled SOC values.
-    kernels = [GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func_2d, variance=torch.tensor(samples_df["var_scaled"].iloc[index] * 1e-6, dtype=torch.float64)) for index in range(len(samples_df))]
-
-    X = np.column_stack([param_df["Temperature_degC"].to_numpy(), param_df["SOC"].to_numpy()])
-    Ks = [kernel.forward(torch.tensor(X, dtype=torch.float64)) for kernel in kernels]
-    Ls = [safe_cholesky(K) for K in Ks]
-    add_eps_stand = samples_df["eps_R0 [Ohm]_standardised"].to_numpy()
-    samples_df["eps_R0 [Ohm]_sample"] = [L @ torch.tensor(eps, dtype=torch.float64).T for L, eps in zip(Ls, add_eps_stand)]
-
-    samples_df["r0_with_eps"] = np.nan  # create a new column for the r0 values with eps added to the regular interpolant values at the sampled SOC values.
-    samples_df["r0_with_eps"] = samples_df["r0_with_eps"].astype(object)  # set the dtype of the new column to object, so we can store arrays in it.
-    r0_array = np.zeros((len(samples_df["Chain"].unique()), len(samples_df["Iteration"].unique()), len(equiv_sampled_r0_values)), dtype=object)  # create an array to store the r0 values with eps added to the regular interpolant values at the sampled SOC values.
-
-    for chain in samples_df["Chain"].unique():
-        chain_df = samples_df[samples_df["Chain"] == chain]
-        for idx, row in chain_df.iterrows():
-            iter_samples = []
-            eps_r0 = row["eps_R0 [Ohm]_sample"].detach().numpy()
-            # add the eps values to the regular interpolant values at the sampled SOC values
-      
-            equiv_sampled_r0_values_with_eps = equiv_sampled_r0_values + eps_r0  # add the eps values to the regular interpolant values at the sampled SOC values
-            iter_samples.append(equiv_sampled_r0_values_with_eps)
-        chain_samples = np.array(iter_samples)
-
-        r0_array[chain-1, :, :] = chain_samples  # store the r0 values with eps added to the regular interpolant values at the sampled SOC values in the r0_array
-
-    plot_traces(xs=range(len(r0_array[0,0])), Ys = r0_array, multiple_chains=True)
-    # need to change how samples are saved to and read from a df I think, now I have got parallel computation working correctly...
+    
+    plot_r0_traces(samples_df=samples_df, param_df=param_df, equiv_sampled_r0_values=equiv_sampled_r0_values)  # plot the traces of the R0 parameter with eps added to the regular interpolant values at the sampled SOC values

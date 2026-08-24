@@ -275,6 +275,8 @@ def graph_model_outputs(sim, gauss_interps: list[tuple[str, object]] = None, y0:
 # ------------------------------------------------------------------------------------------
 
 
+
+
 def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value', multiple_chains: bool = False):
         """
         Plot the parameter values against a given x value for each iteration of the inference process. This function is useful for visualizing how the parameter values evolve over iterations.
@@ -316,11 +318,13 @@ def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces O
         )
 
         def update(val):
-            print(f"Updating plot for iteration {val}...")
             idx = int(slider.val)
+            print("setting index at:", idx)
             for i, line in enumerate(lines):
                 if multiple_chains:
-                    line.set_ydata(Ys[i, idx, :])
+                    y_data = Ys[i, idx, :]
+                    line.set_ydata(y_data)
+                    line.set_label(f"Chain {i+1} Iteration {idx}")
                 else:
                     line.set_ydata(Ys[idx, :])
             ax.legend()
@@ -671,7 +675,17 @@ def make_plot(
     tidy_up(save_name)
 
 
-def subjectively_better_subplots(
+def test_plot_traces():
+    # Create some synthetic data for testing
+    n_iterations = 10
+    n_points = 50
+    xs = np.linspace(0, 10, n_points)
+    Ys = np.array([np.sin(xs + i * 0.1) for i in range(n_iterations)])
+
+    # Call the plot_traces function
+    fig, slider = plot_traces(xs, Ys, title="Test Parameter Traces", xlabel="X-axis", ylabel="Y-axis", multiple_chains=False)
+
+def subjectively_better_subplots(  
     nrows,
     subheight=10 / 3,
     subwidth=10,

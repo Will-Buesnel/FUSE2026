@@ -45,6 +45,7 @@ class Simulator:
 
     def set_gauss_interps(self, gauss_interps: list[tuple[str, dict]]):
 
+
         for name, hyperparams in gauss_interps:
 
             # create a new ParameterFunction with Gaussian noise for the specified parameter
@@ -55,8 +56,6 @@ class Simulator:
             K = kernel.forward(torch.tensor(X, dtype=torch.float64))
             K_jittered = K + torch.eye(len(X), dtype=torch.float64) * 1e-6 * hyperparams['variance']   # make the jitter adapt to the variance of the model.
       
-        
-            
             try:
                 L = safe_cholesky(K_jittered)  # Cholesky decomposition of the covariance matrix. This is allowed to have negative & positive values
             except RuntimeError as e:
@@ -92,12 +91,13 @@ class Simulator:
             #print("sampling eps_standardised from a gaussian process with mean0 and variance: 1", )
             # going to try reducing the state space of the model by only sampling the epsilons for 25 degrees; the rest can go to zero. This is because the model is only trained at 25 degrees, so the other temperatures are not well constrained. This will reduce the state space and make the inference more stable.
             param_df_25_deg_indexes = self.param_df[self.param_df["Temperature_degC"] == 25].index.to_numpy()
-            eps_standardised = torch.zeros(len(self.param_df), dtype=L.dtype)  # initialise
-            eps_standardised[param_df_25_deg_indexes] = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(param_df_25_deg_indexes), dtype=L.dtype), torch.ones(len(param_df_25_deg_indexes), dtype=L.dtype)).to_event(1))
-
+            eps_standardised = torch.zeros(self.param_df.shape[0], dtype=L.dtype)  # initialise
+            sampled_25_deg_values = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(param_df_25_deg_indexes), dtype=L.dtype), torch.ones(len(param_df_25_deg_indexes), dtype=L.dtype)).to_event(1))
+            eps_standardised[param_df_25_deg_indexes] = sampled_25_deg_values
             #eps_standardised = pyro.sample(f"eps_{name}_standardised", dist.Normal(torch.zeros(len(self.param_df), dtype=L.dtype), torch.ones(len(self.param_df), dtype=L.dtype)).to_event(1))  # sample standard normal epsilons. Helps the randon walk not blow up when choosing next steps.
      
             eps_sample = L @ eps_standardised
+
             # debug: force eps_sample to be zero for now, to check that the model works without noise.
             # eps_sample = torch.zeros(len(self.param_df), dtype=torch.float32)  # debug: force eps_sample
             #print(f"{L=}")
@@ -133,6 +133,10 @@ class Simulator:
             current_func = self.current_func,
             **kwargs
         )
+
+    def set_bayesian_model_params(self, bayesian_model_params):
+        self.bayesian_model_params = bayesian_model_params
+        self.variational_param_dim = bayesian_model_params.get_total_dimensionality()
 
 
 class Cell:

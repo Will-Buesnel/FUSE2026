@@ -17,7 +17,7 @@ import pyro.distributions as dist
 import pyro.contrib.gp as gp
 from scipy.interpolate import UnivariateSpline
 from pyro.infer.mcmc.mcmc_kernel import MCMCKernel
-from pyro.infer.autoguide.initialization import init_to_median
+from pyro.infer.autoguide.initialization import init_to_median, init_to_uniform
 
 import matplotlib.pyplot as plt # here for debugging matricies; ignore elsewise
 
@@ -145,16 +145,23 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         c0: torch.tensor | None = None, # it infers the dtype for any samples from this. Potentially this is not an optimal method, but it works.
     ):
         self.model = model
-        self.init_step_size = init_step_size
         self.target_accept_prob = target_accept_prob
         self.adapt_start = adapt_start # t0 in the haario et al paper. This is the number of steps before we start adapting the covariance matrix.
         self.epsilon = epsilon
         self.sd_scale = sd_scale  # set to 2.4**2 / dim once dim is known, if None
         self.c0 = c0
         self._t = 0
-        self._log_step_size = math.log(init_step_size)
         self._accept_cnt = 0
         self._mean_accept_prob = 0.0
+
+        self._post_adapt_steps = 0  # number of steps after adapt_start, used for computing running mean acceptance rate.
+        self._post_adapt_accept_cnt = 0  # number of accepted steps after adapt_start, used for computing running mean acceptance rate.
+        self._mean_accept_rate = 0.0  # running mean of the acceptance rate, updated after each step (post warmup)
+        self._post_warmup_steps = 0  # number of steps after warmup, used for computing running mean acceptance rate.
+        self._last_target_ratio = -50  # store the last target ratio for logging
+        self._last_alpha = -50  # store the last acceptance probability for logging
+        self._last_big_dim_moved = 0
+
         super().__init__()
         
 
@@ -169,7 +176,7 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             self.model,
             model_args=args,
             model_kwargs=kwargs,
-            init_strategy=init_to_median(num_samples=15)
+            init_strategy=init_to_median,
         )
         self._energy_last = self.potential_fn(self._initial_params)
 
@@ -207,6 +214,7 @@ class AdaptiveMetropolisHastings(MCMCKernel):
 
         self._scatter = torch.zeros(self._dim, self._dim, dtype=self.c0.dtype)
 
+
         
     def _flatten(self, params):
         return torch.cat([params[k].reshape(-1) for k in self._site_names])
@@ -234,6 +242,7 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         self.emp_cov = (t-1)/t * self.emp_cov + self.sd_scale/t * (t*torch.outer(X_t_1bar, X_t_1bar) - (t+1) * torch.outer(X_tbar, X_tbar)
         + torch.outer(X_t, X_t))
         + self.epsilon * torch.eye(self._dim, dtype=self.c0.dtype)  # add ridge term for numerical stability
+
         cond_number = torch.linalg.cond(self.emp_cov)
         if cond_number > 1e10:
             print(f"Warning: covariance matrix is ill-conditioned at step {self._t}. Condition number = {cond_number:.2e}")
@@ -264,24 +273,19 @@ class AdaptiveMetropolisHastings(MCMCKernel):
     
 
     def sample(self, params): 
-        # turn params dtype to desired:
+        
         params = {k: v.to(self.c0.dtype) for k, v in params.items()}
         flat_params = self._flatten(params)
-        # debugging:
-
-        # print(f"Step {self._t}: current params = {flat_params}")
-        # print(f"Step {self._t}: current energy = {self._energy_last}")
-        # print(f"Step {self._t}: current empirical covariance matrix = {self.emp_cov}")
 
         if self._t <= self.adapt_start:
             
             proposal = flat_params + torch.distributions.MultivariateNormal(loc=torch.zeros(self._dim, dtype=self.c0.dtype), covariance_matrix=self.c0).sample()
-            use_cov = self.c0
-
+            proposal_params = self._unflatten(proposal)
+            #print("proposed params:", proposal_params)
+            #print("using c0 cov matrix:", self.c0)
         else:
-            # use empirical covariance proposal
             try:
-                torch.linalg.cholesky(self.emp_cov)
+                proposal = flat_params + torch.distributions.MultivariateNormal(loc=torch.zeros(self._dim, dtype=self.c0.dtype), covariance_matrix=self.emp_cov).sample()
             except RuntimeError as e:
                 # print the error message and the empirical covariance matrix for debugging
                 print(f"Cholesky decomposition failed at step {self._t}. Empirical covariance matrix:\n{self.emp_cov}")
@@ -289,24 +293,21 @@ class AdaptiveMetropolisHastings(MCMCKernel):
                 eigvals = torch.linalg.eigvalsh(self.emp_cov)
                 print(f"Eigenvalues of empirical covariance matrix:\n{eigvals}")
                 raise e
-            proposal = flat_params + torch.distributions.MultivariateNormal(loc=torch.zeros(self._dim, dtype=self.c0.dtype), covariance_matrix=self.emp_cov).sample()
-            use_cov = self.emp_cov
-
+            
         
         proposal_params = self._unflatten(proposal)
         energy_proposal = self.potential_fn(proposal_params) # energy proposal approximates the target density fn given in the paper by pi.
         prev_energy = self._energy_last
 
         target_ratio = energy_proposal - prev_energy # I think you minus because these are log probs?
-        # compute proposal density ratio. This is the ratio of the proposal density at the current point to the proposal density at the proposed point.
-        # proposal_next_given_current = torch.distributions.MultivariateNormal(loc=flat_params, covariance_matrix=use_cov).log_prob(proposal)
-        # proposal_current_given_next = torch.distributions.MultivariateNormal(loc=proposal, covariance_matrix=use_cov).log_prob(flat_params)
-        # proposal_ratio = torch.exp(proposal_current_given_next - proposal_next_given_current)
+        self._last_target_ratio = target_ratio.item()
+     
         proposal_ratio = 1.0 # since the proposal is symmetric, the ratio is 1.0
         # compute acceptance probability alpha
 
         alpha = min(1.0, torch.exp(-target_ratio) * proposal_ratio)
         self._last_alpha = alpha
+        self._last_big_dim_moved = (proposal - flat_params).abs().argmax() # store the largest dimension moved for logging
 
 
         # accept if alpha is greater than a uniformly distributed randomly sampled number
@@ -320,6 +321,9 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             flat_params = proposal
             params = proposal_params
             accepted_state_flag = True
+
+            if self._t > self.adapt_start:
+                self._post_adapt_accept_cnt +=1 
 
         self._t += 1  # increment the step counter
 
@@ -336,21 +340,23 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             eigvals, eigvecs = torch.linalg.eigh(self.emp_cov)
             stiff_direction = eigvecs[:, 0]  # eigh returns ascending order, so index 0 = min eigenvalue
             print(f"Stiff direction: {stiff_direction}")
-       
-            
-        # # debugging print statements
-        # print(f"Step {self._t}: acceptance probability = {alpha:.4f}")
-        # print(f"{proposal_ratio=}")
-        # print(f"t={self._t}, target_ratio={target_ratio.item():.3f}, ||proposal-flat_params||={torch.norm(proposal-flat_params).item():.4f}")
-        # tiny_proposal = flat_params + 1e-6 * torch.randn_like(flat_params)
-        # print(self.potential_fn(self._unflatten(tiny_proposal)) - self._energy_last)
+
+        if self._t > self.adapt_start:
+            self._post_adapt_steps += 1
 
         return params.copy()
     
-
     @property
     def initial_params(self):
         return self._initial_params
+
+    @property
+    def acceptance_rate(self):
+        return self._accept_cnt / max(1, self._t)
+
+    @property
+    def post_adapt_acceptance_rate(self):   
+        return self._post_adapt_accept_cnt / max(1, self._post_adapt_steps)
 
     @initial_params.setter
     def initial_params(self, params):
@@ -359,14 +365,21 @@ class AdaptiveMetropolisHastings(MCMCKernel):
     def logging(self):
         return OrderedDict(
             [
-                ("step size", "{:.2e}".format(math.exp(self._log_step_size))),
-                ("acc. prob", "{:.3f}".format(self._mean_accept_prob)),
+                #("step size", "{:.2e}".format(math.exp(self._log_step_size))),
+                #("acc. prob", "{:.3f}".format(self._mean_accept_prob)),
+                ("acc. rate", "{:.3f}".format(self.acceptance_rate)),
+                #("post-apt acc. rate", "{:.3f}".format(self.post_adapt_acceptance_rate)),
+                ("target_ratio", "{:.3f}".format(self._last_target_ratio)),
+                ("alphapr", "{:.3f}".format(self._last_alpha)),
+                ("big_dim_mv", "{:.3e}".format(self._last_big_dim_moved)),
             ]
         )
 
     def diagnostics(self):
         return {
             "acceptance rate": self._accept_cnt / max(1, self._t - self._warmup_steps),
+            "mean acceptance prob": self._mean_accept_prob,
+            "acceptance rate (running mean)": self._mean_accept_rate
         }
 
 class MCMCStop(Exception):
@@ -428,40 +441,17 @@ def visualise_lengthscale_func_2d():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    # create a grid of temperature and SOC values
-    temp_vals = np.linspace(5, 40, 100)
-    soc_vals = np.linspace(0.1, 1, 100)
-    temp_grid, soc_grid = np.meshgrid(temp_vals, soc_vals)
-    x_grid = np.column_stack([temp_grid.ravel(), soc_grid.ravel()])
-
-    # compute lengthscales for the grid
-    lengthscales = lengthscale_func_2d(torch.tensor(x_grid, dtype=torch.float32))
-    l_temp, l_soc = lengthscales[:, 0].numpy(), lengthscales[:, 1].numpy()
-
-    # reshape for plotting
-    l_temp_grid = l_temp.reshape(temp_grid.shape)
-    l_soc_grid = l_soc.reshape(soc_grid.shape)
-
-    # plot lengthscale for temperature
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.contourf(temp_grid, soc_grid, l_temp_grid, levels=20, cmap='viridis')
-    plt.colorbar(label='Lengthscale (Temperature)')
-    plt.xlabel('Temperature (°C)')
-    plt.ylabel('SOC')
-    plt.title('Lengthscale Function for Temperature')
-
-    # plot lengthscale for SOC
-    plt.subplot(1, 2, 2)
-    plt.contourf(temp_grid, soc_grid, l_soc_grid, levels=20, cmap='viridis')
-    plt.colorbar(label='Lengthscale (SOC)')
-    plt.xlabel('Temperature (°C)')
-    plt.ylabel('SOC')
-    plt.title('Lengthscale Function for SOC')
-
-    plt.tight_layout()
+    # just plot lengthscale for soc, at a temp of 25 degC, as this is the temperature at which we are sampling the parameters.
+    socs = np.linspace(0, 1, 100)
+    temps = 25 * np.ones_like(socs)
+    lengthscales = lengthscale_func_2d(torch.tensor(np.column_stack([temps, socs]), dtype=torch.float32))
+    l_temp, l_soc = lengthscales[:, 0], lengthscales[:, 1]
+    plt.plot(socs, l_soc.detach().numpy())
+    plt.xlabel('SOC')
+    plt.ylabel('Lengthscale (SOC)')
+    plt.title('Lengthscale Function for SOC at 25°C')
     plt.show()
-    
+
 
 
 if __name__ == "__main__":
