@@ -14,6 +14,9 @@ It is simpler(no tuning required) and often faster than metropolis or gibbs-base
 The elliptical nature of it (I believe) means that we don't have to contrain the search space to purely an exact circle.
 
 # Usage
+
+**Most importantly, the project will not run until the datafiles are all inplace. See data/README.md for more details**
+
 1. Use generate_samples.py to do the actual inference, with bayesian and deterministic parameters of your choosing. By default this will do inference with Adaptive Metroplis-Hastings.
     Running the above (which will take some time just a heads up) will create a directory in data/results/MC_testing. At a high level, the only one currently important is the samples.pt, which contains the inferred samples after warmup.
 2. Use the generate_posteriors.py file to use these inferred samples to generate full posteriors on the variational parameters, specifying the filepath corresponding to the previously generated file.
