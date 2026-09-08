@@ -78,5 +78,7 @@ conda activate myenv
 pip install -r requirements.txt
 ```
 
+The models will not work without the large datafiles in the correct place. I cannot leave them in this repo as they are too large.
+**See data/README.md for info on what datafiles go where.**
 
 [1]: https://era.ed.ac.uk/server/api/core/bitstreams/5433fd51-56d5-4ab9-9fdb-1caffe1b3dc6/content
