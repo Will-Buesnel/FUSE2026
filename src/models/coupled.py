@@ -205,6 +205,7 @@ class CoupledModel(BaseModel):
                 verbose: bool = False,
                 slow: bool = False,
                 **kwargs):
+        
         """
         Simulate the coupled model over time.
         y0: initial state vector, should be a list of length equal to the sum of the state sizes of the electrical and thermal models.
@@ -218,6 +219,8 @@ class CoupledModel(BaseModel):
 
         t_span = t_eval[0], t_eval[-1] if t_eval is not None else (0, 1)
         t_max = t_span[1]
+
+        
 
         if verbose:
             print(f"Starting simulation with y0={y0}, t_max={t_max}, max_step={max_step}, atol={atol}, rtol={rtol}, t_eval={t_eval}, pbar={pbar}, verbose={verbose}, slow={slow}")

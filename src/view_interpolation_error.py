@@ -8,8 +8,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 from utils import safe_cholesky, set_rc_params, convert_pred_samples_to_df, get_path_to_figures_dir, get_path_to_data_dir
-from simulation import Simulator
-from run_experiment import initialise_simulator
+from simulation import Simulator, BayesianModelParams
+from bin.run_experiment import initialise_simulator
 from bayesianModel import generate_standard_simulator
 from models.local_stats import GibbsKernel, lengthscale_func_2d
 from models.parameters import ParameterFunction
@@ -57,7 +57,12 @@ def get_r0_eps(param_df: pd.DataFrame = None, mc_filename: str = "test.pt", deg_
         add_eps_stand[deg_25_indexes] = torch.tensor(import_sample_from_results(mc_filename, method="All")["eps_R0 [Ohm]_standardised"], dtype=torch.float64)
     else:
         add_eps_stand = import_sample_from_results(mc_filename, method="All")["eps_R0 [Ohm]_standardised"]
-    var = import_sample_from_results(mc_filename, method="All")["var_scaled"] * 1e-6
+    try:    
+        var = import_sample_from_results(mc_filename, method="All")["var_scaled"] * 1e-6
+    except KeyError:
+        params = BayesianModelParams()
+        params.set_variational_params()
+        var = params.variational_params["var_scaled"][0]
     kernel = GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func_2d, variance=var)
 
     # forward the kernel to get the covariance matrix for the parameter function:
@@ -69,25 +74,49 @@ def get_r0_eps(param_df: pd.DataFrame = None, mc_filename: str = "test.pt", deg_
 def main():
     set_rc_params()
     param_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_params.csv")
-    r0_eps = get_r0_eps(param_df, mc_filename="test6.pt", deg_25_only=True)  # get the epsilons for R0 from the MC results, and apply them to the simulator.
+    r0_eps = get_r0_eps(param_df, mc_filename="IthinkThisIsTheActualGoodOne.pt", deg_25_only=True)  # get the epsilons for R0 from the MC results, and apply them to the simulator.
     phys_exp_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_shortened.csv")
     phys_exp_df = phys_exp_df.iloc[:int(len(phys_exp_df) * 0.9)]  # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
     # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
     eval_times = phys_exp_df["deq_Elapsed Time[h]"].to_numpy() * 3600  # convert to seconds
 
-    sim = generate_standard_simulator(stop_idx=len(eval_times)-1, use_deq=False)
+    sim_og = generate_standard_simulator(stop_idx=len(eval_times)-1, use_deq=False)
+    
+    sim_new = generate_standard_simulator(stop_idx=len(eval_times)-1, use_deq=False)  # create a new simulator to add the epsilons to, so we can compare the results.
+    sim_new.param_interpolants["R0 [Ohm]"].set_eps_interpolator(temps = param_df["Temperature_degC"].to_numpy(),socs = param_df["SOC"].to_numpy(), eps_sample = r0_eps.detach().numpy())
+    
+    socs = np.linspace(0.05, 1, 100)
+    r0_default_interp = sim_og.param_interpolants["R0 [Ohm]"]
+    r0_with_eps_interp = sim_new.param_interpolants["R0 [Ohm]"]
 
-    res_std = sim.run_simulation(pbar=True, t_eval=eval_times)
+    r0_default = r0_default_interp(soc=socs, T=np.full_like(socs, 25))
+    r0_with_eps = r0_with_eps_interp(soc=socs, T=np.full_like(socs, 25))
 
+    print(f"R0 default: {r0_default}")
+    print(f"R0 with epsilons: {r0_with_eps}")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(socs, r0_default, label="Default R0 Interpolant", color="blue", linestyle="--")
+    ax.plot(socs, r0_with_eps, label="R0 Interpolant with epsilons", color="red", linestyle="--")
+    ax.set_xlabel("SOC")
+    ax.set_ylabel("R0 [Ohm]")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(get_path_to_figures_dir() / "r0_interpolants_comparison.pdf")
+
+
+    sim_og_results = sim_og.run_simulation(pbar=True, t_eval=eval_times)
+
+    
     # add the gaussian-process-simulated epsilons to the simulator, and run the simulation again:
-    sim.param_interpolants["R0 [Ohm]"].set_eps_interpolator(temps = param_df["Temperature_degC"].to_numpy(),socs = param_df["SOC"].to_numpy(), eps_sample = r0_eps.detach().numpy())
-    sim_results = sim.run_simulation(pbar=True, t_eval=eval_times)
+    sim_new.param_interpolants["R0 [Ohm]"].set_eps_interpolator(temps = param_df["Temperature_degC"].to_numpy(),socs = param_df["SOC"].to_numpy(), eps_sample = r0_eps.detach().numpy())
+    sim_new_results = sim_new.run_simulation(pbar=True, t_eval=eval_times)
 
 
     # compare the errors:
 
-    orig_abs_error = np.abs(res_std["v_cell [V]"] - phys_exp_df["Voltage(V)"].to_numpy())
-    new_abs_error = np.abs(sim_results["v_cell [V]"] - phys_exp_df["Voltage(V)"].to_numpy())
+    orig_abs_error = sim_og_results["v_cell [V]"] - phys_exp_df["Voltage(V)"].to_numpy()
+    new_abs_error = sim_new_results["v_cell [V]"] - phys_exp_df["Voltage(V)"].to_numpy()
     print(f"Original mean absolute error: {orig_abs_error.mean()}")
     print(f"New mean absolute error: {new_abs_error.mean()}")
 
@@ -96,31 +125,51 @@ def main():
 
     # plot the simulation results + physicaly experiment. Three subplots; one for the current, one for voltage, & one for the error.
 
-
+    eval_times_h = eval_times / 3600  # convert to hours for plotting
 
     fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    axs[0].plot(eval_times, phys_exp_df["Current(A)"], label="Physical Experiment", color="green", linewidth=2)
-    axs[0].plot(eval_times, res_std["I [A]"], label="Default Simulation", color="blue", linestyle="--")
-    #axs[0].plot(eval_times, sim_results["I [A]"], label="Simulation with new interpolants", color="red", linestyle="--")
+    axs[0].plot(eval_times_h, phys_exp_df["Current(A)"], label="Physical Experiment", color="green", linewidth=2)
+    axs[0].plot(eval_times_h, -sim_og_results["I [A]"], label="Default Simulation", color="blue", linestyle="--")
+    axs[0].plot(eval_times_h, -sim_new_results["I [A]"], label="Simulation with new interpolants", color="red", linestyle="--")
     axs[0].set_ylabel("Current [A]")
     axs[0].legend()
 
 
-    axs[1].plot(eval_times, phys_exp_df["Voltage(V)"], label="Physical Experiment", color="black", linewidth=2)
-    axs[1].plot(eval_times, res_std["v_cell [V]"], label="Default Simulation", color="blue", linestyle="--")
-    #axs[1].plot(eval_times, sim_results["v_cell [V]"], label="Simulation with new interpolants", color="red", linestyle="--")
+    axs[1].plot(eval_times_h, phys_exp_df["Voltage(V)"], label="Physical Experiment", color="black", linewidth=2)
+    axs[1].plot(eval_times_h, sim_og_results["v_cell [V]"], label="Default Simulation", color="blue", linestyle="--")
+    axs[1].plot(eval_times_h, sim_new_results["v_cell [V]"], label="Simulation with new interpolants", color="red", linestyle="--")
     axs[1].set_ylabel("Voltage [V]")
     axs[1].legend()
 
-    axs[2].plot(eval_times, orig_abs_error, label="Default Simulation Error", color="brown", linestyle="--")
-    axs[2].plot(eval_times, new_abs_error, label="Simulation with new interpolants Error", color="red", linestyle="--")
-    axs[2].set_xlabel("Time [s]")
+    axs[2].plot(eval_times_h, orig_abs_error, label="Default Simulation Error", color="brown", linestyle="--")
+    axs[2].plot(eval_times_h, new_abs_error, label="Simulation with new interpolants Error", color="red", linestyle="--")
+    axs[2].set_xlabel("Time [h]")
     axs[2].set_ylabel("Absolute Error [V]")
     axs[2].legend()
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(get_path_to_figures_dir() / "simulation_results_comparison.pdf")
+
     
+    # plot the traces of temps & r0 over the simulation time, to see how they differ.
+
+    temps_og = sim_og_results["T [°C]"]
+    temps_new = sim_new_results["T [°C]"]
+    r0_og = sim_og_results["R0 [Ohm]"]
+    r0_new = sim_new_results["R0 [Ohm]"]
+
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    axs[0].plot(eval_times_h, temps_og, label="Default Simulation", color="blue", linestyle="--")
+    axs[0].plot(eval_times_h, temps_new, label="New Simulation", color="red", linestyle="--")
+    axs[0].set_ylabel("Temperature [°C]")
+    axs[0].legend()
+
+    axs[1].plot(eval_times_h, r0_og, label="Default Simulation R0", color="blue", linestyle="--")
+    axs[1].plot(eval_times_h, r0_new, label="Simulation with new interpolants R0", color="red", linestyle="--")
+    axs[1].set_xlabel("Time [h]")
+    axs[1].set_ylabel("R0 [Ohm]")
+
+    plt.savefig(get_path_to_figures_dir() / "simulation_traces_comparison.pdf")
 
 
 

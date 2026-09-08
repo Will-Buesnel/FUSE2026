@@ -1,5 +1,5 @@
 """
-Initially this was written with the help of Claude while I got to grips with Pyro.
+Initially a large part thiss this was written with the help of Claude while I got to grips with Pyro.
 
 As I got further into the proejct I realised the implementations of these things were not correct in some cases, and unclear in almost all.
 
@@ -15,9 +15,10 @@ import torch
 import pyro
 import pyro.distributions as dist
 import pyro.contrib.gp as gp
-from scipy.interpolate import UnivariateSpline
 from pyro.infer.mcmc.mcmc_kernel import MCMCKernel
 from pyro.infer.autoguide.initialization import init_to_median, init_to_uniform
+import pyro.poutine as poutine
+from pyro.infer.mcmc.util import initialize_model
 
 import matplotlib.pyplot as plt # here for debugging matricies; ignore elsewise
 
@@ -101,19 +102,7 @@ class GibbsKernel(gp.kernels.Kernel):
             return K.diag()
         return K
     
-
-
-import math
 from collections import OrderedDict
-
-import torch
-
-import pyro
-import pyro.distributions as dist
-from pyro.infer.mcmc.mcmc_kernel import MCMCKernel
-from pyro.infer.mcmc.util import initialize_model
-
-
 class AdaptiveMetropolisHastings(MCMCKernel):
     r"""
     Gradient-free random-walk Metropolis kernel that adapts the FULL proposal
@@ -161,7 +150,7 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         self._last_target_ratio = -50  # store the last target ratio for logging
         self._last_alpha = -50  # store the last acceptance probability for logging
         self._last_big_dim_moved = 0
-
+        self.debug = False  # set to True to print out the log probs at each site for debugging
         super().__init__()
         
 
@@ -213,6 +202,8 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             # technically speaking it is actually 2.38.
 
         self._scatter = torch.zeros(self._dim, self._dim, dtype=self.c0.dtype)
+        self._post_adapt_steps = 0
+        self._setup_blocks(dim_threshold=2)  # automatically group sites into blocks based on their dimensionality
 
 
         
@@ -270,7 +261,22 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         cond_number = torch.linalg.cond(self.emp_cov)
         if cond_number > 1e10:
             print(f"Warning: ill-conditioned at step {self._t}. cond = {cond_number:.2e}")
-    
+      
+
+    def _welford_update_block(self, blk, X_t):
+        t = blk['_t']
+        mean_prev = blk['_mean'].clone()
+        blk['_mean'] = blk['_mean'] + (X_t - blk['_mean']) / t
+
+        delta_prev = X_t - mean_prev
+        delta_curr = X_t - blk['_mean']
+        blk['_scatter'] = blk['_scatter'] + torch.outer(delta_prev, delta_curr)
+
+        if t > 1:
+            cov = blk['sd_scale'] * blk['_scatter'] / (t - 1)
+            cov = cov + self.epsilon * torch.eye(blk['dim'], dtype=self.c0.dtype)
+            blk['emp_cov'] = 0.5 * (cov + cov.T)
+
 
     def sample(self, params): 
         
@@ -328,7 +334,7 @@ class AdaptiveMetropolisHastings(MCMCKernel):
         self._t += 1  # increment the step counter
 
         if self._t > 1:
-                                self._Welford_update_empir_cov(proposal if accepted_state_flag else params_before) # update the empirical covariance matrix with the new sample.
+            self._Welford_update_empir_cov(proposal if accepted_state_flag else params_before) # update the empirical covariance matrix with the new sample.
 
          # update the mean acceptance probability
         self._mean_accept_prob = (self._mean_accept_prob * (self._t -1)+ alpha) / (self._t)
@@ -345,6 +351,163 @@ class AdaptiveMetropolisHastings(MCMCKernel):
             self._post_adapt_steps += 1
 
         return params.copy()
+    
+
+    def sample_within_gibbs(self, params): # metropolis-within-gibbs sampling. 
+        # I tried to implement this in the final week of the project, but in the end couldn't really get to the point where I was happy w it.
+        
+        params = {k: v.to(self.c0.dtype) for k, v in params.items()}
+        flat_params = self._flatten(params)
+
+        for block_name, block in self.blocks.items():
+            idx = block['idx']
+            dim = block['dim']
+
+            if block['_t'] <= self.adapt_start:
+                step = torch.distributions.MultivariateNormal(
+                    loc=torch.zeros(dim, dtype=self.c0.dtype),
+                    covariance_matrix=block['sd_scale'] * block['c0']
+                ).sample()
+            else:
+                try:
+                    step = torch.distributions.MultivariateNormal(
+                        loc=torch.zeros(dim, dtype=self.c0.dtype),
+                        covariance_matrix=block['emp_cov']
+                    ).sample()
+                except RuntimeError as e:
+                    print(f"Cholesky decomposition failed for block '{block_name}' at step {block['_t']}. Empirical covariance matrix:\n{block['emp_cov']}")
+                    eigvals = torch.linalg.eigvalsh(block['emp_cov'])
+                    print(f"Eigenvalues of empirical covariance matrix:\n{eigvals}")
+                    raise e
+            
+            proposal = flat_params.clone()
+            proposal[idx] = flat_params[idx] + step        
+            proposal_params = self._unflatten(proposal)
+
+
+            if self.debug:
+                with poutine.trace() as tr:
+                    energy_proposal = self.potential_fn(proposal_params)
+                trace = tr.trace
+                trace.compute_log_prob()
+                for site_name, site in trace.nodes.items():
+                    if site["type"] == "sample":
+                        lp = site["log_prob"].sum()
+                        is_obs = site.get("is_observed", False)
+                        print(f"  [{'LIK' if is_obs else 'PRIOR'}] {site_name}: {lp.item():.3f}")
+                print(f"obs_scale (unconstrained): {proposal_params['obs_scale']}")
+            
+                obs_scale_constrained = self.transforms['obs_scale'].inv(proposal_params['obs_scale'])
+                print(f"obs_scale (constrained): {obs_scale_constrained.item():.5f}")
+
+                obss_site = trace.nodes['obss']
+                fn = obss_site['fn']
+                base = fn.base_dist if hasattr(fn, 'base_dist') else fn
+
+                predicted = base.loc
+                scale = base.scale
+                observed = obss_site['value']
+                residual = (observed - predicted).detach()
+
+                print(f"n points: {residual.numel()}")
+                print(f"residual: mean={residual.mean():.3f}, std={residual.std():.3f}, "
+                    f"max_abs={residual.abs().max():.3f}, median_abs={residual.abs().median():.3f}")
+                print(f"scale (obs noise SD): {scale if scale.numel()==1 else scale.unique()}")
+
+                per_point_logprob = base.log_prob(observed).detach()
+                worst_idx = torch.argsort(per_point_logprob)[:10]
+                print(f"worst 10 log-prob contributions: {per_point_logprob[worst_idx]}")
+                print(f"worst 10 residuals: {residual[worst_idx]}")
+                print(f"sum of worst 10: {per_point_logprob[worst_idx].sum():.3f} out of total {per_point_logprob.sum():.3f}")
+            else:
+                energy_proposal = self.potential_fn(proposal_params)
+
+            energy_proposal = self.potential_fn(proposal_params) # energy proposal approximates the target density fn given in the paper by pi.
+            prev_energy = self._energy_last
+
+            target_ratio = - 1* (energy_proposal - prev_energy) # I think you minus because these are log probs?
+            self._last_target_ratio = target_ratio.item()
+        
+            proposal_ratio = 1.0 # since the proposal is symmetric, the ratio is 1.0
+            # compute acceptance probability alpha
+
+            alpha = min(1.0, torch.exp(target_ratio) * proposal_ratio)
+            self._last_alpha = alpha
+            self._last_big_dim_moved = (proposal - flat_params).abs().argmax() # store the largest dimension moved for logging
+
+
+            # accept if alpha is greater than a uniformly distributed randomly sampled number
+            
+            block_before = flat_params[idx].clone()  # store the block before update for empirical covariance update
+            accepted = torch.rand(1).item() < alpha
+
+            if accepted:
+                block['accept_cnt'] += 1
+                self._accept_cnt += 1
+                self.energy_last = energy_proposal
+                flat_params = proposal
+                if block['_t'] > self.adapt_start:
+                    block['_post_adapt_accept_cnt'] += 1
+
+                # # print the block acceptance rate for debugging
+                # block_accept_rate = block['accept_cnt'] / max(1, block['_t'])
+                #print(f"Acceptance rate for block {block_name}: {block_accept_rate:.3f}")
+
+            block['_t'] += 1  # increment the step counter for this block
+            self._t += 1  # increment the global step counter
+
+            block['mean_accept_prob'] = (block['mean_accept_prob'] * (block['_t'] - 1) + alpha) / block['_t']
+
+            # welford update for block:
+            used_value_block = flat_params[idx] if accepted else block_before
+            self._welford_update_block(block, used_value_block)
+
+        # finally, return the final params
+
+        final_params = self._unflatten(flat_params)
+        return final_params.copy()
+
+    def _setup_blocks(self, dim_threshold=5):
+        """
+        Automatically groups site names into blocks based on their dimensionality,
+        rather than hardcoding names. Anything with numel <= dim_threshold goes in
+        the 'scalar' block; anything larger gets its own block.
+        """
+        self.blocks = {}
+        scalar_names = []
+
+        for name in self._site_names:
+            n = self._site_numels[name]
+            if n <= dim_threshold:
+                scalar_names.append(name)
+            else:
+                # large block gets its own dedicated group
+                self.blocks[name] = self._make_block(name, [name])
+
+        if scalar_names:
+            self.blocks['scalar_block'] = self._make_block('scalar_block', scalar_names)
+
+    def _make_block(self, block_name, names):
+        idx = torch.cat([
+            torch.arange(self._site_slices[n].start, self._site_slices[n].stop)
+            for n in names
+        ])
+        dim = idx.numel()
+        return {
+            'idx': idx,
+            'dim': dim,
+            'c0': self.c0[idx][:, idx].clone(),
+            'sd_scale': 2.38**2 / dim,
+            'emp_cov': self.c0[idx][:, idx].clone(),
+            '_t': 0,
+            '_mean': torch.zeros(dim, dtype=self.c0.dtype),
+            '_scatter': torch.zeros(dim, dim, dtype=self.c0.dtype),
+            'accept_cnt': 0,
+            '_post_adapt_accept_cnt': 0,
+            'mean_accept_prob': 0.0,
+        }
+
+    
     
     @property
     def initial_params(self):
@@ -437,21 +600,23 @@ def test_lengthscale_func_2d():
     print("Maximum eigenvalue for K:", eigvals.max().item())
 
 
-def visualise_lengthscale_func_2d():
+def visualise_lengthscale_func_2d(ax: plt.Axes = None):
     import matplotlib.pyplot as plt
     import numpy as np
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=convert_fig_size_cm_to_inches((7, 7.5)))
 
     # just plot lengthscale for soc, at a temp of 25 degC, as this is the temperature at which we are sampling the parameters.
     socs = np.linspace(0, 1, 100)
     temps = 25 * np.ones_like(socs)
     lengthscales = lengthscale_func_2d(torch.tensor(np.column_stack([temps, socs]), dtype=torch.float32))
     l_temp, l_soc = lengthscales[:, 0], lengthscales[:, 1]
-    plt.plot(socs, l_soc.detach().numpy())
-    plt.xlabel('SOC')
-    plt.ylabel('Lengthscale (SOC)')
-    plt.title('Lengthscale Function for SOC at 25°C')
-    plt.show()
-
+    ax.plot(socs, l_soc.detach().numpy())
+    ax.set_xlabel('SOC')
+    ax.set_ylabel('Lengthscale (SOC)')
+    ax.set_title('Lengthscale')
+    return ax
 
 
 if __name__ == "__main__":

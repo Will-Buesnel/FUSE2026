@@ -1,3 +1,8 @@
+"""
+Will Buesnel, Aug 26.
+This file was just used to collapse the experiment data at the mean, to reduce its overall size and therefore computation time
+model accuracy stayed fairly similar.
+"""
 from utils import get_path_to_data_dir
 import pandas as pd
 

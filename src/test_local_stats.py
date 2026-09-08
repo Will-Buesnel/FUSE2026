@@ -10,14 +10,17 @@ These are split into three tiers:
 
 Tier 1 and 2 construct a bare instance and hand-set only the attributes
 `_update_empir_cov` / `sample` actually touch, so you don't need a real
-Pyro model to run them. Adjust the import path below to match your module.
+Pyro model to run them.
+
+I run this file with pytest, hence no main function. To run, do:
+    pytest src/test_local_stats.py -v
 """
 
 import math
 import torch
 import pytest
 
-from models.local_stats import AdaptiveMetropolisHastings  # <-- fix this import
+from models.local_stats import AdaptiveMetropolisHastings 
 
 
 def make_bare_kernel(dim, sd_scale=1.0, epsilon=1e-6, adapt_start=0):
@@ -35,6 +38,8 @@ def make_bare_kernel(dim, sd_scale=1.0, epsilon=1e-6, adapt_start=0):
     kernel._mean = torch.zeros(dim, dtype=torch.float32)
     kernel._scatter = torch.zeros(dim, dim, dtype=torch.float32)
     kernel._energy_last = 0.0
+    kernel._post_adapt_steps = 0
+    kernel._post_adapt_accept_cnt = 0
     return kernel
 
 
@@ -79,7 +84,7 @@ def test_running_cov_matches_batch_cov():
     epsilon = 1e-6
     kernel = make_bare_kernel(dim, sd_scale=sd_scale, epsilon=epsilon)
 
-    samples = [torch.randn(dim) for _ in range(500)]  # long chain to wash out epsilon
+    samples = [torch.randn(dim) for _ in range(500)]  # long chain so noise doesn't have a big effect.
     kernel._mean = samples[0].clone()
     kernel.emp_cov = torch.zeros(dim, dim, dtype=torch.float32)
 
@@ -116,9 +121,9 @@ def test_emp_cov_is_symmetric_positive_definite():
 def test_mean_accept_prob_matches_manual_average():
     torch.manual_seed(3)
     dim = 2
-    kernel = make_bare_kernel(dim, adapt_start=1000)  # stay in c0 phase, keep it simple
+    kernel = make_bare_kernel(dim, adapt_start=1000)  # stay in c0 phase
 
-    # monkeypatch a trivial potential_fn: standard normal, so acceptance is well-defined
+    # use a trivial potential_fn: standard normal, so acceptance is well-defined
     kernel.potential_fn = lambda p: 0.5 * (p["x"] ** 2).sum()
     kernel._site_names = ["x"]
     kernel._site_shapes = {"x": (dim,)}
@@ -399,24 +404,3 @@ class TestCrossCovariance:
         K = kernel.forward(X)
         assert K[0, 1].item() < 1e-6 * variance
  
- 
-if __name__ == "__main__":
-
-    variance = torch.tensor(1e-3, dtype=torch.float64)
-    kernel = GibbsKernel(input_dim=2, lengthscale_fn=constant_lengthscale_fn(0.3), variance=variance)
-    print("param value:", kernel.variance.item(), kernel.variance.dtype)
-
-    X = torch.rand(30, 2, dtype=torch.float64)
-    K = kernel.forward(X)
-    print("diag(K) max (no jitter):", torch.diag(K).max().item())
-
-    jitter = 1e-6 * variance
-    K_j = K + torch.eye(len(X), dtype=torch.float64) * jitter
-    print("diag(K_j) max (with jitter):", torch.diag(K_j).max().item())
-
-    L = torch.linalg.cholesky(K_j)
-    print("diag(L @ L.T) max:", torch.diag(L @ L.T).max().item())
-
-
-    # import sys
-    # sys.exit(pytest.main([__file__, "-v"]))

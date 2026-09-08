@@ -14,18 +14,29 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 import csv
 from pathlib import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 from matplotlib.widgets import Slider
 from collections.abc import Sequence
+from cycler import cycler
 
+
+def get_custom_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+    # Define the colors for the colormap
+    rbg_255 = [(43, 51, 128), (202, 210, 222), (237, 28, 36)]
+    colors = [tuple(c / 255 for c in color) for color in rbg_255]
+    cmap = LinearSegmentedColormap.from_list("custom_diverging", colors)
+    return cmap
 
 def set_rc_params():
     """
     Set the default rcParams for matplotlib to make plots look nicer.
     """
+    rgb_255 = [(43, 51, 128), (202, 210, 222), (237, 28, 36)] # Colours 0 & 2 are Faraday colours, middle is 'ice Blue' that I have used in the poster.
+    colours = [tuple(c / 255 for c in colour) for colour in rgb_255]
     plt.rcParams.update({
         "font.size": 12,
         "axes.labelsize": 14,
@@ -40,6 +51,8 @@ def set_rc_params():
         "axes.grid": True,
         "grid.alpha": 0.5,
         "grid.linestyle": "--",
+        "axes.prop_cycle": cycler(color=colours),
+        "savefig.dpi": 600,
     })
 
 def plot_df(df: pd.DataFrame, title: str = "Data Overview", xlabel: str = "Index", ylabel: str = "Value") -> None:
@@ -148,20 +161,19 @@ def get_path_to_figures_dir() -> Path:
 #  -----------------------------------------------------------------------------------
 
 # Utils for pyro model:
-
-
 def plot_mixing(samples: pd.DataFrame, param_names):
 
     num_params = len(param_names)  
     num_chains = samples["Chain"].nunique()
 
-    fig, axs = plt.subplots(num_params, 1)
+    fig, axs = plt.subplots(num_params, 1, squeeze=False)
+    axs = axs.flatten()
 
     for i, param in enumerate(param_names): 
         print(f"Plotting trace for {param}...")
         for chain in range(1, num_chains+1):
             chain_samples = samples[samples["Chain"] == chain][param]
-            axs[i].plot(chain_samples.values, label=f"Chain {chain}", alpha=0.5)
+            axs[i].plot(chain_samples.values, label=f"Chain {chain}", alpha=0.8)
         axs[i].set_title(f"Trace plot for {param}")
         axs[i].set_xlabel("Iteration")
         axs[i].set_ylabel(param)
@@ -169,7 +181,7 @@ def plot_mixing(samples: pd.DataFrame, param_names):
 
     plt.tight_layout()
 
-    plt.show()
+    return fig, axs  # return axs and fig so they aren't garbage-collected in some environments
         
 
 def save_pred_samples_to_pt(samples, filename, with_time=True):
@@ -234,15 +246,26 @@ def df_to_tensor_dict(df, param_cols=None, dtype=torch.float32):
     result = {}
     for param in param_cols:
         sample_len = np.atleast_1d(df[param].iloc[0]).shape[0]
+       
         arr = np.empty((n_chains, n_iters, sample_len), dtype=np.float64)
-        
+    
         for chain, iteration, sample in zip(df['Chain'], df['Iteration'], df[param]):
             arr[chain_idx[chain], iter_idx[iteration], :] = sample
-        
+    
         result[param] = torch.tensor(arr, dtype=dtype)
     
     return result
 
+def tensor_dict_to_not_grouped_by_chains(tensor_dict, drop_index=False) -> Dict:
+    samples_dict = {}
+    for param, tensor in tensor_dict.items():
+        end_tensor = torch.empty((tensor.shape[0] * tensor.shape[1], tensor.shape[2]), dtype=torch.float64)
+        for chain in range(tensor.shape[0]):
+            for iteration in range(tensor.shape[1]):
+                end_tensor[chain * tensor.shape[1] + iteration, :] = tensor[chain, iteration, :]
+        param_dict = {param: end_tensor}
+        samples_dict.update(param_dict)
+    return samples_dict
 
 
 def graph_model_outputs(sim, gauss_interps: list[tuple[str, object]] = None, y0: list = [1,0,0,25], obs=None):
@@ -274,7 +297,17 @@ def graph_model_outputs(sim, gauss_interps: list[tuple[str, object]] = None, y0:
 
 # ------------------------------------------------------------------------------------------
 
+def convert_cm_to_inches(cm: float) -> float:
+    """
+    Convert centimeters to inches.
+    """
+    return cm / 2.54
 
+def convert_fig_size_cm_to_inches(fig_size_cm: tuple[float, float]) -> tuple[float, float]:
+    """
+    Convert figure size from centimeters to inches.
+    """
+    return tuple(convert_cm_to_inches(dim) for dim in fig_size_cm)
 
 
 def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces Over Iterations", xlabel: str = 'x', ylabel: str = 'Parameter Value', multiple_chains: bool = False):
@@ -319,7 +352,6 @@ def plot_traces(xs: np.ndarray, Ys: np.ndarray, title: str = "Parameter Traces O
 
         def update(val):
             idx = int(slider.val)
-            print("setting index at:", idx)
             for i, line in enumerate(lines):
                 if multiple_chains:
                     y_data = Ys[i, idx, :]
