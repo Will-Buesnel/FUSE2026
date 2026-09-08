@@ -8,3 +8,4 @@ src/_sandbox_plot_wlpt_validation.py
 bin/
 data/results/MC_testing/*
 data/processed/*
+data/results/MC_results/*;
