@@ -9,3 +9,4 @@ bin/
 data/results/MC_testing/*
 data/processed/*
 data/results/MC_results/*;
+data/NOTES.md

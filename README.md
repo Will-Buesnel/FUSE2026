@@ -9,7 +9,12 @@ Faraday summer undergraduate experience project looking into using bayesian infe
 
 3. Use view_posteriors.py to graph these posteriors, or use view_interpolation_error.py to see if the inferred parameters improved the model results.
 
-
+# General structure:
+1. Inference mechanics & gaussian processes contained in models/local stats.py
+2. Forward model structure contained in models/coupled.py
+3. Logic for generating interpolation schemes (deterministic and deterministc + gaussian) contained in parameters.py
+4. Logic for using both + adding in empirical data and parameters contained in simulation.py
+5. Logic for running a bayesian model contained in BayesianModel.py 
 
 # Specifics on directory created after inference.
 
@@ -56,8 +61,8 @@ Licence: This work is released under the GNU GPL v3 license. Loosely, this means
 
 Create and activate the conda environment, then install dependencies:
 
-\`\`\`bash
+```bash
 conda create -n myenv python=3.11
 conda activate myenv
 pip install -r requirements.txt
-\`\`\`
+```
