@@ -1,9 +1,12 @@
 # FUSE2026
 Project initial title: "Exploring the coupling between thermal parameters and electrical behaviours."
-This was a Faraday summer undergraduate experience project looking into using bayesian inference to decouple & reduce model error.
+<br>
+This was a **Faraday summer undergraduate experience** project looking into using bayesian inference to decouple & reduce model error.
+<br>
 In this we ran various random walk algrorithms in MonteCarlo Bayesian inference on an involved, stiff forward model. The final results were an improvement on before the inference, but brought up further questions to be explored, since the random walk monte carlo struggled to converge in the conditions and iterations given to it.
-As an improvement to this work, a different inference algorithm is suggested. As currently I would propose gradient free is a better option, I would first look into Elliptical slice sampling.
-It is simpler(no tuning required) and often faster than metropolis or gibbs-based alternatives. Slice sampling allows us to adaptively 'pick up' step sizes [1].
+<br>
+As an improvement to this work, a different inference algorithm is suggested. As currently I would propose gradient free is a better option, I would first look into **Elliptical slice sampling**.
+It is simpler(no tuning required) and often faster than metropolis or gibbs-based alternatives. Slice sampling allows us to adaptively 'pick up' step sizes [ [1] ].
 The elliptical nature of it (I believe) means that we don't have to contrain the search space to purely an exact circle.
 
 # Usage
@@ -14,11 +17,11 @@ The elliptical nature of it (I believe) means that we don't have to contrain the
 3. Use view_posteriors.py to graph these posteriors, or use view_interpolation_error.py to see if the inferred parameters improved the model results.
 
 # General structure:
-1. Inference mechanics & gaussian processes contained in models/local stats.py
-2. Forward model structure contained in models/coupled.py
-3. Logic for generating interpolation schemes (deterministic and deterministc + gaussian) contained in parameters.py
-4. Logic for using both + adding in empirical data and parameters contained in simulation.py
-5. Logic for running a bayesian model contained in BayesianModel.py 
+1. Inference mechanics & gaussian processes contained in **models/local stats.py**
+2. Forward model structure contained in **models/coupled.py**
+3. Logic for generating interpolation schemes (deterministic and deterministc + gaussian) contained in **parameters.py**
+4. Logic for using both + adding in empirical data and parameters contained in **simulation.py**
+5. Logic for running a bayesian model contained in **BayesianModel.py** 
 
 # Specifics on directory created after inference.
 
@@ -71,7 +74,5 @@ conda activate myenv
 pip install -r requirements.txt
 ```
 
-
-## References
 
 [1]: https://era.ed.ac.uk/server/api/core/bitstreams/5433fd51-56d5-4ab9-9fdb-1caffe1b3dc6/content
