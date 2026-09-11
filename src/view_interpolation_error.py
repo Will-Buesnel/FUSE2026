@@ -8,11 +8,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 from utils import safe_cholesky, set_rc_params, convert_pred_samples_to_df, get_path_to_figures_dir, get_path_to_data_dir
-from simulation import Simulator, BayesianModelParams
-from bin.run_experiment import initialise_simulator
+from simulation import BayesianModelParams
 from bayesianModel import generate_standard_simulator
 from models.local_stats import GibbsKernel, lengthscale_func_2d
-from models.parameters import ParameterFunction
+
 
 def import_sample_from_results(sample_name: str, method: str ="Last X", n: int = 10)-> np.ndarray:
     """

@@ -1,11 +1,8 @@
-from scipy.fftpack import shift
-
-from bayesianModel import view_post_distributions, generate_standard_simulator, construct_c0_gp_matrix
-from utils import plot_mixing, plot_traces, safe_cholesky, set_rc_params, get_path_to_figures_dir
+from bayesianModel import generate_standard_simulator
+from utils import set_rc_params, get_path_to_figures_dir
 from utils import get_custom_cmap
 import torch
-from utils import add_zoom_inset, convert_fig_size_cm_to_inches, get_path_to_data_results_dir
-from models.parameters import ParameterFunction, ParameterInterpolator
+from utils import convert_fig_size_cm_to_inches, get_path_to_data_results_dir
 from models.local_stats import GibbsKernel, lengthscale_func_2d, visualise_lengthscale_func_2d
 from scipy import stats
 import matplotlib.pyplot as plt
@@ -13,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import pandas as pd
-from utils import get_path_to_data_dir, convert_pred_samples_to_df
+from utils import get_path_to_data_dir
 from utils import open_pred_samples_as_df
 from view_interpolation_error import get_r0_eps
 
@@ -25,9 +22,9 @@ def main():
     #_plot_obs_mixing(fig_size_cm=(9.5, 7.15))
     # _plot_obs_half_normal()
     # _plot_points_and_interpolation_scheme((15, 5))
-    _plot_r0_prior_distribution(fig_size_cm=(18.5, 8))
+    #_plot_r0_prior_distribution(fig_size_cm=(18.5, 8))
     # _plot_bayesian_diagrams(fig_size_cm=(10, 7))    
-    # _plot_new_error_trace(fig_size_cm=(22.5, 27))
+    _plot_new_error_trace(fig_size_cm=(15, 10))
     plt.cla()
 
 def plot_inset_cov():
@@ -393,7 +390,7 @@ def _plot_random_walk(fig_size_cm=(7, 7.5)):
 def _plot_new_error_trace(fig_size_cm=(3, 10.3)):
     
     param_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_params.csv")
-    r0_eps = get_r0_eps(param_df, mc_filename="IthinkThisIsTheActualGoodOne.pt", deg_25_only=True)  # get the epsilons for R0 from the MC results, and apply them to the simulator.
+    r0_eps = get_r0_eps(param_df, mc_filename="Used_in_presentation.pt", deg_25_only=True)  # get the epsilons for R0 from the MC results, and apply them to the simulator.
     phys_exp_df = pd.read_csv(get_path_to_data_dir() / "processed" / "MLP001_wltp_25degC_record_shortened.csv")
     phys_exp_df = phys_exp_df.iloc[:int(len(phys_exp_df) * 0.9)]  # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
     # shorten physical experiment to remove the last pulse. -i.e. only take the first 8/9s of the rows.
@@ -423,29 +420,13 @@ def _plot_new_error_trace(fig_size_cm=(3, 10.3)):
     # plot the simulation results + physicaly experiment. Three subplots; one for the current, one for voltage, & one for the error.
 
     eval_times_h = eval_times / 3600  # convert to hours for plotting
-    fig, axs = plt.subplots(nrows=3,ncols=1,figsize=convert_fig_size_cm_to_inches(fig_size_cm))
-   
-    fig.subplots_adjust(left=0.15, right=0.95, top=0.9, bottom=0.15)
-    axs[0].plot(eval_times_h, orig_abs_error * 1000, label="Original Model", color=plt.rcParams['axes.prop_cycle'].by_key()['color'][2])
-    axs[0].plot(eval_times_h, new_abs_error * 1000, label="New Model", color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0])
-    axs[0].title.set_text("Error Trace Comparison")
-    axs[0].tick_params(axis="x",labelbottom=False)
-    axs[0].set_ylabel("Error [mV]")
-    axs[0].legend()
-    axs[0].grid(True)
-    from view_posteriors import plot_obs_noise, plot_r0_eps
-    samples = torch.load(get_path_to_data_results_dir() / "MC_testing/AMH_Gibbs_reducedSS_indexes:0:70000_warmup:700_samples:700_chains:3_adapt_600_thisactualgoodone/post_samples.pt")
-    plot_obs_noise(samples["obss"], axs[1])
-    axs[1].sharex(axs[0])
-    axs[1].set_title(r"Posterior Distribution of $\sigma_{\text{obs}}$")
-    plot_r0_eps(samples["eps_R0 [Ohm]_sample"], axs[2])
-    axs[2].set_title(r"Posterior Distribution of $R'_0$")
-    axs[2].set_xlabel("SOC")
-    shift = 0.08  # how much to close the gap by, tune this
-
-# Move ax1 down toward ax2
-    pos1 = axs[1].get_position()
-    axs[1].set_position([pos1.x0, pos1.y0 - shift, pos1.width, pos1.height])
+    fig, ax = plt.subplots(figsize=convert_fig_size_cm_to_inches(fig_size_cm))
+    ax.plot(eval_times_h, orig_abs_error * 1000, label="Original Model", color=plt.rcParams['axes.prop_cycle'].by_key()['color'][2])
+    ax.plot(eval_times_h, new_abs_error * 1000, label="New Model", color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0])
+    ax.set_xlabel("Time [h]")
+    ax.set_ylabel("Error [mV]")
+    ax.legend()
+    ax.grid(True)
     plt.tight_layout()
     plt.savefig(get_path_to_figures_dir() / "new_error_trace.pdf")
 

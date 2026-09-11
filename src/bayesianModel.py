@@ -98,7 +98,7 @@ def model(simulator: Simulator, obs=None):
 )
 
 
-def construct_c0_gp_matrix(param_df, lengthscale_func, variance):
+def construct_c0_gp_matrix(param_df, lengthscale_func, variance): # currently unused, but could be used to construct the c0 matrix for the Gibbs kernel.
     kernel = GibbsKernel(input_dim=2, lengthscale_fn=lengthscale_func, variance=variance)
     X = np.column_stack([param_df["Temperature_degC"].to_numpy(), param_df["SOC"].to_numpy()])
     K = kernel.forward(torch.tensor(X, dtype=torch.float64))
